@@ -17,13 +17,22 @@ nixsand project attach <project> <branch>
 
 ```bash
 # Build
-cargo build
+nix build          # or: cargo build
+
+# Lint (clippy -D warnings -D clippy::pedantic)
+nix build .#clippy
+
+# Type-check without codegen
+nix build .#check
 
 # Unit tests (fast, no external deps)
-cargo test
+nix build .#test   # or: cargo test
 
-# E2E tests (requires macOS aarch64, container CLI, tmux, git; ~2.5 min)
+# E2E tests — requires macOS aarch64 + container CLI + tmux; cannot run in nix sandbox
 cargo test --test e2e -- --ignored --test-threads=1
+# or via the flake (does PATH checks for container/tmux/git first):
+nix run .#e2e
+nix run .#e2e -- <test_name>
 
 # Single unit test
 cargo test <test_name>
@@ -33,6 +42,16 @@ cargo test --test e2e -- --ignored --test-threads=1 <test_name>
 ```
 
 The e2e tests build real container images — ensure at least 15GB free disk before running them. The `nixsand-base` image (~3GB) is kept between runs; per-project images are cleaned up by `ImageCleanup` on test teardown.
+
+## Verifying changes
+
+Type-checking is not verification. Before declaring a change done, run the tests that actually exercise it:
+
+- Touching code reachable from unit tests → `cargo test` (or `nix build .#test`).
+- Touching command logic, container/git/tmux orchestration, or anything called from `main.rs` → run the relevant e2e test (`cargo test --test e2e -- --ignored --test-threads=1 <name>`). E2E tests are heavy but they're the only thing that exercises real `container`/`tmux`/`git` behavior.
+- Touching a single e2e test → run that specific test, not the whole suite.
+
+If a change can't be tested (e.g. macOS-only behavior from a non-macOS environment), say so explicitly rather than claiming success from `cargo check` alone.
 
 ## Architecture
 
@@ -55,7 +74,7 @@ State is persisted in a SQLite database (`~/.nixsand/nixsand.db`, opened via `sr
 
 `src/guard.rs` is a LIFO rollback guard used in `run_branch` to undo partial state (worktree, container) if any step fails.
 
-`src/names.rs` has all naming conventions: container names are `nixsand-<project>-<sanitized-branch>`, tmux sessions are `nixsand.<project>.<sanitized-branch>`, image tags are `nixsand-base` and `nixsand-<project>`.
+`src/names.rs` has all naming conventions: container names are `nixsand-<project>-<sanitized-branch>`, tmux sessions are `nixsand_<project>_<sanitized-branch>` (underscores, not dots — tmux parses `.` as window/pane separators in `-t` target args), image tags are `nixsand-base` and `nixsand-<project>`.
 
 ## Apple container CLI quirks
 
