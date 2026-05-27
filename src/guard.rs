@@ -38,7 +38,7 @@ impl Drop for RollbackGuard {
             // Catch panics from cleanup code
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action));
             if let Err(e) = result {
-                eprintln!("[guard] rollback action panicked: {:?}", e);
+                eprintln!("[guard] rollback action panicked: {e:?}");
             }
         }
     }

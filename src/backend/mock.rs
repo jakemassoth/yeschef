@@ -12,19 +12,19 @@ use super::{ContainerBackend, GitBackend, Mount, ZmxBackend};
 // Recording mock for ContainerBackend
 // ---------------------------------------------------------------------------
 
-/// A recording mock for ContainerBackend.
+/// A recording mock for `ContainerBackend`.
 /// Stores calls as strings (e.g. "build_image:nixsand-base") and returns
 /// pre-configured results.
 #[derive(Clone, Default)]
 pub struct MockContainerBackend {
     pub calls: Arc<Mutex<Vec<String>>>,
-    /// images that "exist" — checked by image_exists
+    /// images that "exist" — checked by `image_exists`
     pub existing_images: Arc<Mutex<Vec<String>>>,
     /// containers that "exist"
     pub existing_containers: Arc<Mutex<Vec<String>>>,
     /// containers that are "running"
     pub running_containers: Arc<Mutex<Vec<String>>>,
-    /// If set, build_image will return this error for the given tag
+    /// If set, `build_image` will return this error for the given tag
     pub build_errors: Arc<Mutex<HashMap<String, String>>>,
 }
 
@@ -54,16 +54,16 @@ impl MockContainerBackend {
 
 impl ContainerBackend for MockContainerBackend {
     fn image_exists(&self, tag: &str) -> Result<bool> {
-        self.record(format!("image_exists:{}", tag));
+        self.record(format!("image_exists:{tag}"));
         let images = self.existing_images.lock().unwrap();
         Ok(images.contains(&tag.to_string()))
     }
 
     fn build_image(&self, tag: &str, _context_dir: &Path) -> Result<()> {
-        self.record(format!("build_image:{}", tag));
+        self.record(format!("build_image:{tag}"));
         let errors = self.build_errors.lock().unwrap();
         if let Some(err) = errors.get(tag) {
-            bail!("{}", err);
+            bail!("{err}");
         }
         // Add to existing images on success
         drop(errors);
@@ -75,13 +75,13 @@ impl ContainerBackend for MockContainerBackend {
     }
 
     fn container_exists(&self, name: &str) -> Result<bool> {
-        self.record(format!("container_exists:{}", name));
+        self.record(format!("container_exists:{name}"));
         let containers = self.existing_containers.lock().unwrap();
         Ok(containers.contains(&name.to_string()))
     }
 
     fn container_running(&self, name: &str) -> Result<bool> {
-        self.record(format!("container_running:{}", name));
+        self.record(format!("container_running:{name}"));
         let running = self.running_containers.lock().unwrap();
         Ok(running.contains(&name.to_string()))
     }
@@ -93,7 +93,7 @@ impl ContainerBackend for MockContainerBackend {
         _mounts: &[Mount],
         _entrypoint: &[&str],
     ) -> Result<()> {
-        self.record(format!("create_container:{}:{}", name, image));
+        self.record(format!("create_container:{name}:{image}"));
         self.existing_containers
             .lock()
             .unwrap()
@@ -102,7 +102,7 @@ impl ContainerBackend for MockContainerBackend {
     }
 
     fn start_container(&self, name: &str) -> Result<()> {
-        self.record(format!("start_container:{}", name));
+        self.record(format!("start_container:{name}"));
         self.running_containers
             .lock()
             .unwrap()
@@ -111,7 +111,7 @@ impl ContainerBackend for MockContainerBackend {
     }
 
     fn remove_container(&self, name: &str) -> Result<()> {
-        self.record(format!("remove_container:{}", name));
+        self.record(format!("remove_container:{name}"));
         self.existing_containers
             .lock()
             .unwrap()
@@ -124,12 +124,12 @@ impl ContainerBackend for MockContainerBackend {
     }
 
     fn exec_interactive(&self, name: &str, command: &str) -> Result<()> {
-        self.record(format!("exec_interactive:{}:{}", name, command));
+        self.record(format!("exec_interactive:{name}:{command}"));
         Ok(())
     }
 
     fn exec(&self, name: &str, command: &str) -> Result<()> {
-        self.record(format!("exec:{}:{}", name, command));
+        self.record(format!("exec:{name}:{command}"));
         Ok(())
     }
 }
@@ -141,7 +141,7 @@ impl ContainerBackend for MockContainerBackend {
 #[derive(Clone, Default)]
 pub struct MockGitBackend {
     pub calls: Arc<Mutex<Vec<String>>>,
-    /// Content to return for read_file requests, keyed by "repo_path:file_path"
+    /// Content to return for `read_file` requests, keyed by "`repo_path:file_path`"
     pub file_contents: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     pub default_branch_response: Arc<Mutex<String>>,
 }
@@ -209,7 +209,7 @@ impl GitBackend for MockGitBackend {
     }
 
     fn read_file(&self, _repo: &Path, path: &str) -> Result<Vec<u8>> {
-        self.record(format!("read_file:{}", path));
+        self.record(format!("read_file:{path}"));
         let contents = self.file_contents.lock().unwrap();
         Ok(contents.get(path).cloned().unwrap_or_default())
     }
@@ -241,13 +241,13 @@ impl MockZmxBackend {
 
 impl ZmxBackend for MockZmxBackend {
     fn session_exists(&self, session: &str) -> Result<bool> {
-        self.record(format!("session_exists:{}", session));
+        self.record(format!("session_exists:{session}"));
         let sessions = self.existing_sessions.lock().unwrap();
         Ok(sessions.contains(&session.to_string()))
     }
 
     fn new_session(&self, session: &str, command: &str) -> Result<()> {
-        self.record(format!("new_session:{}:{}", session, command));
+        self.record(format!("new_session:{session}:{command}"));
         self.existing_sessions
             .lock()
             .unwrap()
@@ -256,7 +256,7 @@ impl ZmxBackend for MockZmxBackend {
     }
 
     fn attach_session(&self, session: &str) -> Result<()> {
-        self.record(format!("attach_session:{}", session));
+        self.record(format!("attach_session:{session}"));
         Ok(())
     }
 }

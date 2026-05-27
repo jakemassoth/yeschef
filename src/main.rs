@@ -24,7 +24,7 @@ fn main() {
     }
 
     if let Err(e) = run(cli) {
-        eprintln!("error: {:#}", e);
+        eprintln!("error: {e:#}");
         std::process::exit(1);
     }
 }

@@ -27,7 +27,7 @@ impl ContainerBackend for RealContainerBackend {
             .status()
             .context("failed to run 'container build'")?;
         if !status.success() {
-            bail!("container build failed for image '{}'", tag);
+            bail!("container build failed for image '{tag}'");
         }
         Ok(())
     }
@@ -87,7 +87,7 @@ impl ContainerBackend for RealContainerBackend {
             .status()
             .context("failed to run 'container create'")?;
         if !status.success() {
-            bail!("container create failed for '{}'", name);
+            bail!("container create failed for '{name}'");
         }
         Ok(())
     }
@@ -110,7 +110,7 @@ impl ContainerBackend for RealContainerBackend {
             .status()
             .context("failed to run 'container rm'")?;
         if !status.success() {
-            bail!("container rm failed for '{}'", name);
+            bail!("container rm failed for '{name}'");
         }
         Ok(())
     }
@@ -121,7 +121,7 @@ impl ContainerBackend for RealContainerBackend {
             .status()
             .context("failed to run 'container exec'")?;
         if !status.success() {
-            bail!("container exec failed for '{}'", name);
+            bail!("container exec failed for '{name}'");
         }
         Ok(())
     }
@@ -153,7 +153,7 @@ impl GitBackend for RealGitBackend {
             .status()
             .context("failed to run 'git clone --bare'")?;
         if !status.success() {
-            bail!("git clone --bare failed for '{}'", url);
+            bail!("git clone --bare failed for '{url}'");
         }
         Ok(())
     }
@@ -166,7 +166,7 @@ impl GitBackend for RealGitBackend {
             .status()
             .context("failed to run 'git config'")?;
         if !status.success() {
-            bail!("git config {} {} failed", key, value);
+            bail!("git config {key} {value} failed");
         }
         Ok(())
     }
@@ -203,8 +203,7 @@ impl GitBackend for RealGitBackend {
             .arg(bare_repo)
             .args(["rev-parse", "--verify", branch])
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+            .is_ok_and(|o| o.status.success());
 
         let mut cmd = Command::new("git");
         cmd.args(["-C"]).arg(bare_repo).arg("worktree").arg("add");
@@ -218,7 +217,7 @@ impl GitBackend for RealGitBackend {
             .status()
             .context("failed to run 'git worktree add'")?;
         if !status.success() {
-            bail!("git worktree add failed for branch '{}' from '{}'", branch, base);
+            bail!("git worktree add failed for branch '{branch}' from '{base}'");
         }
         Ok(())
     }
@@ -262,7 +261,7 @@ impl GitBackend for RealGitBackend {
         let output = Command::new("git")
             .args(["-C"])
             .arg(repo)
-            .args(["show", &format!("HEAD:{}", path)])
+            .args(["show", &format!("HEAD:{path}")])
             .output()
             .context("failed to run 'git show'")?;
         if !output.status.success() {
@@ -294,7 +293,7 @@ impl ZmxBackend for RealZmxBackend {
             .status()
             .context("failed to run 'tmux new-session'")?;
         if !status.success() {
-            bail!("tmux new-session failed for '{}'", session);
+            bail!("tmux new-session failed for '{session}'");
         }
         Ok(())
     }
@@ -305,7 +304,7 @@ impl ZmxBackend for RealZmxBackend {
             .status()
             .context("failed to run 'tmux attach-session'")?;
         if !status.success() {
-            bail!("tmux attach-session failed for '{}'", session);
+            bail!("tmux attach-session failed for '{session}'");
         }
         Ok(())
     }
@@ -320,11 +319,10 @@ pub fn check_binary(name: &str) -> Result<()> {
     let output = Command::new("which")
         .arg(name)
         .output()
-        .with_context(|| format!("failed to run 'which {}': is 'which' available?", name))?;
+        .with_context(|| format!("failed to run 'which {name}': is 'which' available?"))?;
     if !output.status.success() {
         bail!(
-            "required dependency '{}' not found in PATH; please install it before using nixsand",
-            name
+            "required dependency '{name}' not found in PATH; please install it before using nixsand"
         );
     }
     Ok(())

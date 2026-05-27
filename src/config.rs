@@ -65,7 +65,7 @@ impl Config {
 }
 
 /// Resolve the nixsand home directory.
-/// Uses NIXSAND_HOME env var if set, otherwise ~/.nixsand.
+/// Uses `NIXSAND_HOME` env var if set, otherwise ~/.nixsand.
 pub fn resolve_home() -> Result<PathBuf> {
     if let Ok(env_home) = std::env::var("NIXSAND_HOME") {
         return Ok(PathBuf::from(env_home));
@@ -80,9 +80,7 @@ pub fn check_platform() -> Result<()> {
     let arch = std::env::consts::ARCH;
     if os != "macos" || arch != "aarch64" {
         bail!(
-            "nixsand requires macOS on Apple Silicon (aarch64), but detected {} {}",
-            os,
-            arch
+            "nixsand requires macOS on Apple Silicon (aarch64), but detected {os} {arch}"
         );
     }
     Ok(())

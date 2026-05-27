@@ -13,7 +13,7 @@ pub fn run_init() -> Result<()> {
 
     // Create home dir and projects subdir
     std::fs::create_dir_all(home.join("projects"))
-        .map_err(|e| anyhow::anyhow!("failed to create nixsand home directory: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("failed to create nixsand home directory: {e}"))?;
 
     // Initialize the database (idempotent schema migration)
     let db_path = home.join("nixsand.db");

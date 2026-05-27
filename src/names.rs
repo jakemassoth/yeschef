@@ -12,25 +12,23 @@ pub fn validate_project_name(name: &str) -> Result<()> {
         let c = name.chars().next().unwrap();
         if c.is_ascii_lowercase() || c.is_ascii_digit() {
             return Ok(());
-        } else {
-            bail!("project name '{}' is invalid: must be lowercase alphanumeric or hyphen", name);
         }
+        bail!("project name '{name}' is invalid: must be lowercase alphanumeric or hyphen");
     }
     // Multi-char: no consecutive hyphens, no leading/trailing hyphen, lowercase only
     if name.starts_with('-') {
-        bail!("project name '{}' must not start with a hyphen", name);
+        bail!("project name '{name}' must not start with a hyphen");
     }
     if name.ends_with('-') {
-        bail!("project name '{}' must not end with a hyphen", name);
+        bail!("project name '{name}' must not end with a hyphen");
     }
     if name.contains("--") {
-        bail!("project name '{}' must not contain consecutive hyphens", name);
+        bail!("project name '{name}' must not contain consecutive hyphens");
     }
     for c in name.chars() {
         if !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '-' {
             bail!(
-                "project name '{}' contains invalid character '{}': only lowercase letters, digits, and hyphens are allowed",
-                name, c
+                "project name '{name}' contains invalid character '{c}': only lowercase letters, digits, and hyphens are allowed"
             );
         }
     }
@@ -85,7 +83,7 @@ pub fn sanitize_branch(branch: &str) -> String {
 
 /// Derive the container name from project + branch.
 pub fn container_name(project: &str, sanitized_branch: &str) -> String {
-    format!("nixsand-{}-{}", project, sanitized_branch)
+    format!("nixsand-{project}-{sanitized_branch}")
 }
 
 /// Derive the tmux session name from project + branch.
@@ -94,7 +92,7 @@ pub fn container_name(project: &str, sanitized_branch: &str) -> String {
 /// session/window/pane target syntax in `-t` arguments, which would break
 /// `has-session` and `attach-session` for any name containing dots.
 pub fn zmx_session_name(project: &str, sanitized_branch: &str) -> String {
-    format!("nixsand_{}_{}", project, sanitized_branch)
+    format!("nixsand_{project}_{sanitized_branch}")
 }
 
 /// The base image tag.
@@ -104,7 +102,7 @@ pub fn base_image_tag() -> &'static str {
 
 /// The per-project image tag.
 pub fn project_image_tag(project: &str) -> String {
-    format!("nixsand-{}", project)
+    format!("nixsand-{project}")
 }
 
 #[cfg(test)]

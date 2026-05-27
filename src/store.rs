@@ -61,15 +61,15 @@ impl Store {
                 params![name, git_url],
             )
             .with_context(|| {
-                format!("failed to add project '{}': name may already be taken", name)
+                format!("failed to add project '{name}': name may already be taken")
             })?;
         if rows == 0 {
-            return Err(anyhow!("project '{}' already exists", name));
+            return Err(anyhow!("project '{name}' already exists"));
         }
         Ok(())
     }
 
-    /// List all projects. Returns (name, git_url) pairs.
+    /// List all projects. Returns (name, `git_url`) pairs.
     pub fn list_projects(&self) -> Result<Vec<(String, String)>> {
         let mut stmt = self
             .conn
@@ -105,7 +105,7 @@ impl Store {
                 "INSERT OR REPLACE INTO branches (project, branch, sanitized) VALUES (?1, ?2, ?3)",
                 params![project, branch, sanitized],
             )
-            .with_context(|| format!("failed to add branch '{}' for project '{}'", branch, project))?;
+            .with_context(|| format!("failed to add branch '{branch}' for project '{project}'"))?;
         Ok(())
     }
 
@@ -133,7 +133,7 @@ impl Store {
                 params![project, branch],
             )
             .with_context(|| {
-                format!("failed to remove branch '{}' for project '{}'", branch, project)
+                format!("failed to remove branch '{branch}' for project '{project}'")
             })?;
         Ok(())
     }
@@ -145,7 +145,7 @@ impl Store {
                 "UPDATE projects SET flake_lock_hash = ?1 WHERE name = ?2",
                 params![hash, project],
             )
-            .with_context(|| format!("failed to update flake.lock hash for project '{}'", project))?;
+            .with_context(|| format!("failed to update flake.lock hash for project '{project}'"))?;
         Ok(())
     }
 
