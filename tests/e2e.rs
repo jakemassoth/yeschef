@@ -146,6 +146,25 @@ impl Drop for ImageCleanup {
     }
 }
 
+/// Kill tmux sessions on drop (best-effort teardown).
+struct TmuxSessionCleanup(Vec<String>);
+
+impl TmuxSessionCleanup {
+    fn new(names: impl IntoIterator<Item = String>) -> Self {
+        TmuxSessionCleanup(names.into_iter().collect())
+    }
+}
+
+impl Drop for TmuxSessionCleanup {
+    fn drop(&mut self) {
+        for name in &self.0 {
+            let _ = Command::new("tmux")
+                .args(["kill-session", "-t", name])
+                .output();
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // init tests
 // ---------------------------------------------------------------------------
@@ -524,5 +543,76 @@ fn project_branch_nonexistent_project_fails_cleanly() {
     assert!(
         !env.home_path().join("projects").join("no-such-project").exists(),
         "no directory should be created for unknown project"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// project attach happy-path test (heavy: builds images, creates tmux session)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "heavy: builds real container images; requires macOS aarch64 + container + tmux"]
+fn project_attach_creates_and_reattaches_tmux_session() {
+    let env = TestEnv::new();
+    env.init();
+
+    let repo = SampleRepo::new();
+    let name = unique_name();
+
+    env.cmd()
+        .args(["project", "add", &repo.url(), &name])
+        .assert()
+        .success();
+
+    let container_nm = format!("nixsand-{}-main", name);
+    let session_nm = format!("nixsand_{}_main", name);
+    let _container_cleanup = ContainerCleanup::new([container_nm.clone()]);
+    let _image_cleanup = ImageCleanup::new([format!("nixsand-{}", name)]);
+    let _session_cleanup = TmuxSessionCleanup::new([session_nm.clone()]);
+
+    // Provision the branch so attach has a worktree + container to talk to.
+    env.cmd()
+        .args(["project", "branch", &name, "main"])
+        .assert()
+        .success();
+
+    // First attach: `tmux new-session -d` creates the session detached (no TTY
+    // needed); the subsequent `tmux attach-session` fails because the test
+    // process has no controlling TTY. We only care that the session was created.
+    let first = env
+        .cmd()
+        .args(["project", "attach", &name, "main"])
+        .output()
+        .expect("nixsand attach failed to spawn");
+    let first_stderr = String::from_utf8_lossy(&first.stderr);
+    assert!(
+        first_stderr.contains("creating new tmux session"),
+        "first attach should log session creation; got stderr:\n{}",
+        first_stderr
+    );
+
+    // Session must exist in tmux.
+    let has = Command::new("tmux")
+        .args(["has-session", "-t", &session_nm])
+        .output()
+        .expect("tmux has-session failed to spawn");
+    assert!(
+        has.status.success(),
+        "tmux session '{}' should exist after first attach (stderr={})",
+        session_nm,
+        String::from_utf8_lossy(&has.stderr),
+    );
+
+    // Second attach: session already exists → should take the reattach branch.
+    let second = env
+        .cmd()
+        .args(["project", "attach", &name, "main"])
+        .output()
+        .expect("nixsand attach failed to spawn");
+    let second_stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        second_stderr.contains("reattaching to existing session"),
+        "second attach should reuse the existing session; got stderr:\n{}",
+        second_stderr
     );
 }

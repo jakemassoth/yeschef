@@ -89,8 +89,12 @@ pub fn container_name(project: &str, sanitized_branch: &str) -> String {
 }
 
 /// Derive the tmux session name from project + branch.
+///
+/// Uses `_` as the separator rather than `.` because tmux parses `.` as
+/// session/window/pane target syntax in `-t` arguments, which would break
+/// `has-session` and `attach-session` for any name containing dots.
 pub fn zmx_session_name(project: &str, sanitized_branch: &str) -> String {
-    format!("nixsand.{}.{}", project, sanitized_branch)
+    format!("nixsand_{}_{}", project, sanitized_branch)
 }
 
 /// The base image tag.
@@ -148,7 +152,7 @@ mod tests {
     fn zmx_session_name_derivation() {
         assert_eq!(
             zmx_session_name("myproject", "feature-foo"),
-            "nixsand.myproject.feature-foo"
+            "nixsand_myproject_feature-foo"
         );
     }
 
