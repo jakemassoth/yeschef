@@ -59,9 +59,13 @@ Pick one and use it consistently. The examples below use the bare `nixsand` form
 For each piece of work the human gives you:
 
 1. **Resolve the project.** If it isn't registered yet, `nixsand project add` it.
-2. **Dispatch.** Pick a short branch name and spawn the crewmate with a clear initial
-   prompt:
-   `nixsand spawn <project> <branch> -p "Implement X. When done, summarize what changed."`
+2. **Dispatch.** Always start from the latest `main`. Fetch first, then base the
+   worktree off the freshly-fetched remote tip (`--base origin/main`) — never off a
+   stale local `main`, or the branch will collide on merge. Pick a short branch name
+   and spawn the crewmate with a clear initial prompt that also tells it to rebase
+   before finishing:
+   `git -C <project-repo> fetch origin`
+   `nixsand spawn <project> <branch> --base origin/main -p "Implement X. Before you open the PR, rebase onto the latest origin/main and resolve any conflicts. When done, summarize what changed."`
 3. **Supervise.** Poll `nixsand status`. For any task that looks active or stuck,
    `nixsand peek` its pane to see what's happening. Run several crewmates at once —
    spawn them all, then cycle through `peek`.
@@ -85,6 +89,15 @@ For each piece of work the human gives you:
   re-spawn to investigate.
 - Don't bundle long-running shell commands into the same step as supervision — keep
   your `status`/`peek` cycle responsive.
+- **Always base branches off the latest `main` and rebase before the PR.** `fetch`
+  before you `spawn` and pass `--base origin/main`; tell every crewmate in its initial
+  prompt to `git fetch origin` and rebase onto `origin/main` (resolving conflicts and
+  re-running tests) before opening or finalizing its PR. This keeps PRs clean to merge.
+- **Ignore ghost text in a crewmate's input box.** When you `peek`, greyed text in the
+  prompt (e.g. a suggested next message like `commit this`) is Claude Code's placeholder
+  suggestion — not something the crewmate typed or will run, and it does not matter. A
+  real `nixsand send` overrides it; don't try to clear it with Escape/Ctrl-U/backspace
+  (those won't touch it because the buffer is actually empty).
 
 ## Working on nixsand itself
 
