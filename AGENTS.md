@@ -98,6 +98,14 @@ For each piece of work the human gives you:
   suggestion — not something the crewmate typed or will run, and it does not matter. A
   real `nixsand send` overrides it; don't try to clear it with Escape/Ctrl-U/backspace
   (those won't touch it because the buffer is actually empty).
+- **First launch may need a confirmation — and it can swallow your prompt.** The
+  first time an agent launches in a fresh worktree (or the first ever on a machine),
+  Claude Code may show a trust-folder or bypass-permissions dialog. After every
+  `spawn`, `peek` the pane within ~20 seconds. If such a dialog is showing, accept it
+  with `nixsand send <project> <branch> "1"` (or whatever choice the dialog requires)
+  and verify the agent started processing. Accepting the dialog usually swallows the
+  initial `-p` prompt, so once the agent is idle at its input box, re-send the prompt
+  with `nixsand send`.
 
 ## Working on nixsand itself
 
