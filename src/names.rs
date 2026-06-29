@@ -81,16 +81,19 @@ pub fn sanitize_branch(branch: &str) -> String {
     result
 }
 
-/// The single tmux session that holds every task window.
+/// The crew session name that namespaces every task window.
+///
+/// The real zmx backend maps each task window onto a standalone zmx session
+/// named `<nixsand_session>-<window>`.
 pub fn nixsand_session() -> &'static str {
     "nixsand"
 }
 
-/// Derive the tmux window name for a task from project + sanitized branch.
+/// Derive the task window name from project + sanitized branch.
 ///
-/// Avoids `.` and `:` because tmux parses them as window/pane and
-/// session/window separators in `-t` target arguments. `sanitize_branch`
-/// already strips `.`/`:`, so a `-` join is target-safe.
+/// Avoids `.` and `:` (historically tmux target separators) so the name stays
+/// safe to embed in a zmx session id. `sanitize_branch` already strips `.`/`:`,
+/// so a `-` join is safe.
 pub fn window_name(project: &str, sanitized_branch: &str) -> String {
     format!("{project}-{sanitized_branch}")
 }

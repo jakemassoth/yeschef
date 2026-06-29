@@ -146,57 +146,64 @@ impl GitBackend for RealGitBackend {
 }
 
 // ---------------------------------------------------------------------------
-// ZmxBackend — wraps `tmux`
+// ZmxBackend — wraps `zmx` (session attach/detach for the terminal)
 // ---------------------------------------------------------------------------
+//
+// zmx has no window concept — every session is a single PTY. The orchestrator
+// trait is window-oriented (one `nixsand` session holding many task windows),
+// so we map each `<session>:<window>` pair onto a standalone zmx session named
+// `<session>-<window>`. `session_exists`/`list_windows` then derive the
+// crew's state from the set of `<session>-…` zmx sessions.
 
 pub struct RealZmxBackend;
 
-/// Build a `session:window` target string for tmux `-t` args.
-fn target(session: &str, window: &str) -> String {
-    format!("{session}:{window}")
+/// Build the flat zmx session id for a task window. zmx has no windows, so each
+/// window becomes its own session, namespaced under the crew session name.
+fn zid(session: &str, window: &str) -> String {
+    format!("{session}-{window}")
+}
+
+/// List the names of all active zmx sessions (one per line via `zmx ls --short`).
+fn zmx_sessions() -> Result<Vec<String>> {
+    let output = Command::new("zmx")
+        .args(["ls", "--short"])
+        .output()
+        .context("failed to run 'zmx ls --short'")?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
 }
 
 impl ZmxBackend for RealZmxBackend {
     fn session_exists(&self, session: &str) -> Result<bool> {
-        let output = Command::new("tmux")
-            .args(["has-session", "-t", session])
-            .output()
-            .context("failed to run 'tmux has-session'")?;
-        Ok(output.status.success())
+        // The crew "session" exists if any task session is registered under it.
+        let prefix = format!("{session}-");
+        Ok(zmx_sessions()?.iter().any(|s| s.starts_with(&prefix)))
     }
 
-    fn ensure_session(&self, session: &str) -> Result<()> {
-        if self.session_exists(session)? {
-            return Ok(());
-        }
-        // Create a detached session. The initial window is a throwaway shell;
-        // task windows are added with `new_window`.
-        let status = Command::new("tmux")
-            .args(["new-session", "-d", "-s", session, "-n", "nixsand"])
-            .status()
-            .context("failed to run 'tmux new-session'")?;
-        if !status.success() {
-            bail!("tmux new-session failed for '{session}'");
-        }
+    fn ensure_session(&self, _session: &str) -> Result<()> {
+        // No-op: zmx creates sessions lazily on `zmx run`, and there is no
+        // parent session to hold windows — each task window is its own session.
         Ok(())
     }
 
     fn new_window(&self, session: &str, window: &str, cwd: &Path, command: &str) -> Result<()> {
-        // Target the session with a trailing colon (`<session>:`) so tmux picks
-        // the next free window index. A bare `-t <session>` target instead
-        // tries to (re)use the session's base index, which fails with
-        // "index N in use" under `base-index`/`renumber-windows` configs.
-        let target = format!("{session}:");
-        let mut cmd = Command::new("tmux");
-        cmd.args(["new-window", "-t", &target, "-n", window, "-c"])
-            .arg(cwd)
-            // `--` terminates option parsing; the command runs via the user's shell.
-            .args(["--", "sh", "-lc", command]);
-        let status = cmd
+        // `zmx run <name> -d <command...>` creates a detached session running
+        // the command. zmx has no working-directory flag, so we `cd` first and
+        // run everything through a login shell (matching the tmux behaviour).
+        let id = zid(session, window);
+        let full = format!("cd {} && {command}", shell_single_quote(&cwd.to_string_lossy()));
+        let status = Command::new("zmx")
+            .args(["run", &id, "-d", "sh", "-lc", &full])
             .status()
-            .context("failed to run 'tmux new-window'")?;
+            .context("failed to run 'zmx run'")?;
         if !status.success() {
-            bail!("tmux new-window failed for '{session}:{window}'");
+            bail!("zmx run failed for '{id}'");
         }
         Ok(())
     }
@@ -206,106 +213,118 @@ impl ZmxBackend for RealZmxBackend {
     }
 
     fn send_keys(&self, session: &str, window: &str, text: &str) -> Result<()> {
-        let tgt = target(session, window);
-        // Send the literal text (`-l`), then Enter as a separate key event.
-        let status = Command::new("tmux")
-            .args(["send-keys", "-t", &tgt, "-l", "--", text])
+        let id = zid(session, window);
+        // `zmx send` writes raw bytes to the session PTY. Send the literal text,
+        // then a carriage return as a separate event to submit it (the PTY reads
+        // CR as Enter).
+        let status = Command::new("zmx")
+            .args(["send", &id, text])
             .status()
-            .context("failed to run 'tmux send-keys'")?;
+            .context("failed to run 'zmx send'")?;
         if !status.success() {
-            bail!("tmux send-keys failed for '{tgt}'");
+            bail!("zmx send failed for '{id}'");
         }
-        let status = Command::new("tmux")
-            .args(["send-keys", "-t", &tgt, "Enter"])
+        let status = Command::new("zmx")
+            .args(["send", &id, "\r"])
             .status()
-            .context("failed to run 'tmux send-keys Enter'")?;
+            .context("failed to run 'zmx send' (Enter)")?;
         if !status.success() {
-            bail!("tmux send-keys Enter failed for '{tgt}'");
+            bail!("zmx send (Enter) failed for '{id}'");
         }
         Ok(())
     }
 
     fn capture_pane(&self, session: &str, window: &str, lines: Option<usize>) -> Result<String> {
-        let tgt = target(session, window);
-        let mut cmd = Command::new("tmux");
-        cmd.args(["capture-pane", "-p", "-t", &tgt]);
-        let start;
-        if let Some(n) = lines {
-            // `-S -N` starts the capture N lines above the visible bottom.
-            start = format!("-{n}");
-            cmd.args(["-S", &start]);
-        }
-        let output = cmd.output().context("failed to run 'tmux capture-pane'")?;
+        let id = zid(session, window);
+        // `zmx history` dumps the full session scrollback; trim to the last N
+        // lines ourselves to mirror tmux's `capture-pane -S -N`.
+        let output = Command::new("zmx")
+            .args(["history", &id])
+            .output()
+            .context("failed to run 'zmx history'")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("tmux capture-pane failed for '{}': {}", tgt, stderr.trim());
+            bail!("zmx history failed for '{}': {}", id, stderr.trim());
         }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        let full = String::from_utf8_lossy(&output.stdout).into_owned();
+        match lines {
+            Some(n) => {
+                let all: Vec<&str> = full.lines().collect();
+                let start = all.len().saturating_sub(n);
+                let mut tail = all[start..].join("\n");
+                if full.ends_with('\n') {
+                    tail.push('\n');
+                }
+                Ok(tail)
+            }
+            None => Ok(full),
+        }
     }
 
     fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>> {
-        let output = Command::new("tmux")
-            .args([
-                "list-windows",
-                "-t",
-                session,
-                "-F",
-                "#{window_name}\t#{window_active}\t#{pane_dead}",
-            ])
-            .output()
-            .context("failed to run 'tmux list-windows'")?;
-        if !output.status.success() {
-            // No session / no windows → empty list.
-            return Ok(Vec::new());
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut windows = Vec::new();
-        for line in stdout.lines() {
-            let mut parts = line.split('\t');
-            let name = parts.next().unwrap_or_default().to_string();
-            if name.is_empty() {
-                continue;
-            }
-            let active = parts.next() == Some("1");
-            let dead = parts.next() == Some("1");
-            windows.push(WindowInfo { name, active, dead });
-        }
+        // Recover task windows from the set of `<session>-…` zmx sessions. zmx
+        // exposes no per-session active/dead state (a finished task's session
+        // simply disappears), so both flags are always false; a vanished task
+        // surfaces as "gone" rather than "dead" in `status`.
+        let prefix = format!("{session}-");
+        let windows = zmx_sessions()?
+            .into_iter()
+            .filter_map(|s| {
+                s.strip_prefix(&prefix).map(|name| WindowInfo {
+                    name: name.to_string(),
+                    active: false,
+                    dead: false,
+                })
+            })
+            .collect();
         Ok(windows)
     }
 
     fn kill_window(&self, session: &str, window: &str) -> Result<()> {
-        let tgt = target(session, window);
-        let output = Command::new("tmux")
-            .args(["kill-window", "-t", &tgt])
+        let id = zid(session, window);
+        let output = Command::new("zmx")
+            .args(["kill", &id, "--force"])
             .output()
-            .context("failed to run 'tmux kill-window'")?;
+            .context("failed to run 'zmx kill'")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // A window that's already gone is not an error for teardown.
-            if stderr.contains("can't find window") || stderr.contains("no such window") {
+            // A session that's already gone is not an error for teardown.
+            if stderr.contains("not found") || stderr.contains("no such") {
                 return Ok(());
             }
-            bail!("tmux kill-window failed for '{}': {}", tgt, stderr.trim());
+            bail!("zmx kill failed for '{}': {}", id, stderr.trim());
         }
         Ok(())
     }
 
     fn attach(&self, session: &str, window: Option<&str>) -> Result<()> {
-        if let Some(w) = window {
-            // Best-effort: select the task's window before attaching.
-            let _ = Command::new("tmux")
-                .args(["select-window", "-t", &target(session, w)])
-                .status();
-        }
-        let status = Command::new("tmux")
-            .args(["attach-session", "-t", session])
+        // zmx attaches to a single session (one PTY). With a task selected,
+        // attach to that task's session directly; otherwise fall back to the
+        // first live task session in the crew.
+        let id = if let Some(w) = window {
+            zid(session, w)
+        } else {
+            let prefix = format!("{session}-");
+            zmx_sessions()?
+                .into_iter()
+                .find(|s| s.starts_with(&prefix))
+                .ok_or_else(|| anyhow::anyhow!("no live nixsand sessions to attach to"))?
+        };
+        let status = Command::new("zmx")
+            .args(["attach", &id])
             .status()
-            .context("failed to run 'tmux attach-session'")?;
+            .context("failed to run 'zmx attach'")?;
         if !status.success() {
-            bail!("tmux attach-session failed for '{session}'");
+            bail!("zmx attach failed for '{id}'");
         }
         Ok(())
     }
+}
+
+/// Wrap a string in single quotes for safe inclusion in a `sh -lc` command,
+/// escaping any embedded single quotes.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 // ---------------------------------------------------------------------------

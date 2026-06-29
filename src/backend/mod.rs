@@ -22,7 +22,7 @@ pub trait GitBackend: Send + Sync {
     fn default_branch(&self, bare_repo: &Path) -> Result<String>;
 }
 
-/// Liveness/identity info for a single tmux window.
+/// Liveness/identity info for a single task window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowInfo {
     pub name: String,
@@ -30,12 +30,13 @@ pub struct WindowInfo {
     pub dead: bool,
 }
 
-/// Trait abstracting tmux terminal multiplexer operations.
+/// Trait abstracting `zmx` terminal session operations.
 ///
-/// All windows live in a single session (see `names::nixsand_session`). Tasks
-/// are addressed as `<session>:<window>`. The orchestrator drives windows via
-/// `send_keys`/`capture_pane` without being attached; the human attaches
-/// separately to watch.
+/// The orchestrator models tasks as windows under a single `nixsand` session
+/// (see `names::nixsand_session`). zmx has no windows — the real backend maps
+/// each `<session>:<window>` onto a standalone zmx session. The orchestrator
+/// drives windows via `send_keys`/`capture_pane` without being attached; the
+/// human attaches separately to watch.
 pub trait ZmxBackend: Send + Sync {
     fn session_exists(&self, session: &str) -> Result<bool>;
     /// Create the session (detached) if it does not already exist.

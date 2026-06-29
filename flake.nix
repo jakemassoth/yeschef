@@ -12,13 +12,19 @@
       url = "github:nix-community/naersk";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # zmx — session attach/detach for the terminal. Its build is tightly
+    # coupled to zig2nix's pinned nixpkgs + Apple SDK, so we deliberately do
+    # NOT make it follow our nixpkgs; we just consume its built package.
+    zmx-flake.url = "github:thrawny/zmx-flake";
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay, naersk }:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay, naersk, zmx-flake }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
+        # The zmx binary the backend shells out to at runtime.
+        zmx = zmx-flake.packages.${system}.default;
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" "rust-analyzer" ];
         };
@@ -53,10 +59,10 @@
           };
         };
 
-        # nix run .#e2e [-- <test-name>]  — runs the heavy e2e suite outside
-        # the nix sandbox. Requires `git` and `tmux` on PATH; drives real git
-        # worktrees and a real tmux session (no containers, no macOS
-        # requirement).
+        # nix run .#e2e [-- <test-name>]  — runs the e2e suite. It drives the
+        # orchestrator against real git worktrees and a real zmx session, so it
+        # needs `git` and `zmx` on PATH (no containers, no macOS requirement).
+        # `zmx` is supplied by the zmx-flake package and prepended to PATH below.
         # nix run . -- <args>  — run THIS checkout's nixsand. The orchestrator
         # uses this so each branch runs its own build.
         apps.default = {
@@ -68,7 +74,8 @@
           type = "app";
           program = toString (pkgs.writeShellScript "nixsand-e2e" ''
             set -euo pipefail
-            for bin in git tmux; do
+            export PATH="${zmx}/bin:$PATH"
+            for bin in git zmx; do
               if ! command -v "$bin" >/dev/null 2>&1; then
                 echo "error: '$bin' not found in PATH; e2e tests require it" >&2
                 exit 1
@@ -82,7 +89,7 @@
           buildInputs = [
             rustToolchain
             pkgs.cargo-watch
-            pkgs.tmux
+            zmx
           ];
 
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";

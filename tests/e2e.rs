@@ -3,9 +3,9 @@
 //! All tests are `#[ignore]` by default. Run with:
 //!   cargo test --test e2e -- --ignored --test-threads=1
 //!
-//! Requirements: `git` and `tmux` in PATH. No containers, no Nix, no macOS
-//! requirement — the orchestrator drives real git worktrees and a real tmux
-//! session. `--test-threads=1` keeps the shared `nixsand` tmux session sane
+//! Requirements: `git` and `zmx` in PATH. No containers, no Nix, no macOS
+//! requirement — the orchestrator drives real git worktrees and a real zmx
+//! session. `--test-threads=1` keeps the shared `nixsand` zmx sessions sane
 //! across tests (each test uses a unique project name, so windows don't clash).
 
 use std::path::Path;
@@ -96,36 +96,43 @@ fn unique_name() -> String {
     format!("t{pid:08x}{:04x}", nanos & 0xffff)
 }
 
-/// Kill tmux windows on drop (best-effort teardown). Targets `nixsand:<window>`.
+/// The flat zmx session id the backend uses for a task window:
+/// `<nixsand_session>-<window>`.
+fn zid(window: &str) -> String {
+    format!("nixsand-{window}")
+}
+
+/// Kill a task's zmx session on drop (best-effort teardown).
 struct WindowCleanup(Vec<String>);
 
 impl Drop for WindowCleanup {
     fn drop(&mut self) {
         for window in &self.0 {
-            let _ = Command::new("tmux")
-                .args(["kill-window", "-t", &format!("nixsand:{window}")])
+            let _ = Command::new("zmx")
+                .args(["kill", &zid(window), "--force"])
                 .output();
         }
     }
 }
 
-/// Capture a window's pane via the real tmux.
+/// Capture a window's scrollback via the real zmx.
 fn capture(window: &str) -> String {
-    Command::new("tmux")
-        .args(["capture-pane", "-p", "-t", &format!("nixsand:{window}")])
+    Command::new("zmx")
+        .args(["history", &zid(window)])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default()
 }
 
 fn window_exists(window: &str) -> bool {
-    Command::new("tmux")
-        .args(["list-windows", "-t", "nixsand", "-F", "#{window_name}"])
+    let id = zid(window);
+    Command::new("zmx")
+        .args(["ls", "--short"])
         .output()
         .is_ok_and(|o| {
             String::from_utf8_lossy(&o.stdout)
                 .lines()
-                .any(|l| l == window)
+                .any(|l| l.trim() == id)
         })
 }
 
@@ -134,7 +141,7 @@ fn window_exists(window: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires git + tmux; use `cargo test --test e2e -- --ignored`"]
+#[ignore = "requires git + zmx; use `cargo test --test e2e -- --ignored`"]
 fn init_creates_expected_layout() {
     let env = TestEnv::new();
 
@@ -150,7 +157,7 @@ fn init_creates_expected_layout() {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + zmx"]
 fn init_is_idempotent() {
     let env = TestEnv::new();
     env.cmd().arg("init").assert().success();
@@ -166,7 +173,7 @@ fn init_is_idempotent() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + zmx"]
 fn project_list_empty() {
     let env = TestEnv::new();
     env.init();
@@ -178,7 +185,7 @@ fn project_list_empty() {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + zmx"]
 fn project_add_registers_bare_clone() {
     let env = TestEnv::new();
     env.init();
@@ -202,7 +209,7 @@ fn project_add_registers_bare_clone() {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + zmx"]
 fn project_add_duplicate_name_rejected() {
     let env = TestEnv::new();
     env.init();
@@ -221,7 +228,7 @@ fn project_add_duplicate_name_rejected() {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + zmx"]
 fn project_add_invalid_name_rejected() {
     let env = TestEnv::new();
     env.init();
@@ -235,11 +242,11 @@ fn project_add_invalid_name_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// orchestration error tests (no tmux session required)
+// orchestration error tests (no zmx session required)
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + zmx"]
 fn spawn_unknown_project_gives_clear_error() {
     let env = TestEnv::new();
     env.init();
@@ -251,7 +258,7 @@ fn spawn_unknown_project_gives_clear_error() {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + zmx"]
 fn send_unknown_task_gives_clear_error() {
     let env = TestEnv::new();
     env.init();
@@ -273,7 +280,7 @@ fn send_unknown_task_gives_clear_error() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + zmx"]
 fn spawn_creates_worktree_and_live_window() {
     let env = TestEnv::new();
     env.init();
@@ -304,8 +311,8 @@ fn spawn_creates_worktree_and_live_window() {
         .join("demo");
     assert!(worktree.is_dir(), "worktree should exist at {}", worktree.display());
 
-    // tmux window is live.
-    assert!(window_exists(&window), "tmux window '{window}' should exist");
+    // zmx session is live.
+    assert!(window_exists(&window), "zmx session for '{window}' should exist");
 
     // Give the shell a moment to echo, then peek should show the output.
     std::thread::sleep(std::time::Duration::from_millis(800));
@@ -332,7 +339,7 @@ fn spawn_creates_worktree_and_live_window() {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + zmx"]
 fn send_reaches_the_pane() {
     let env = TestEnv::new();
     env.init();
@@ -367,7 +374,7 @@ fn send_reaches_the_pane() {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + zmx"]
 fn kill_removes_window_and_deregisters() {
     let env = TestEnv::new();
     env.init();
@@ -411,7 +418,7 @@ fn kill_removes_window_and_deregisters() {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + zmx"]
 fn spawn_duplicate_window_rejected() {
     let env = TestEnv::new();
     env.init();

@@ -3,7 +3,7 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(
     name = "nixsand",
-    about = "Orchestrate coding agents across git worktrees via tmux"
+    about = "Orchestrate coding agents across git worktrees via zmx"
 )]
 pub struct Cli {
     /// Increase verbosity (-v for debug, -vv for trace)
@@ -22,7 +22,7 @@ pub enum Commands {
     /// Manage projects (add / list)
     Project(ProjectArgs),
 
-    /// Create a worktree and launch an agent in a tmux window
+    /// Create a worktree and launch an agent in a zmx session
     Spawn {
         /// Project name
         project: String,
@@ -64,7 +64,7 @@ pub enum Commands {
     /// List all tasks and whether their agents are still running
     Status,
 
-    /// Attach to the nixsand tmux session to watch the crew
+    /// Attach to a nixsand zmx session to watch the crew
     Attach {
         /// Optional project to select a specific task window
         project: Option<String>,

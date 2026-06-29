@@ -32,7 +32,7 @@ pub fn run_init() -> Result<()> {
 
     // Check host dependencies
     check_host_deps()?;
-    println!("all host dependencies verified (git, tmux)");
+    println!("all host dependencies verified (git, zmx)");
     println!("run your orchestrator agent from {} to load AGENTS.md", home.display());
 
     Ok(())

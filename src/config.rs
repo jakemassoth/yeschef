@@ -75,6 +75,6 @@ pub fn resolve_home() -> Result<PathBuf> {
 /// Validate that all required host binaries are available.
 pub fn check_host_deps() -> Result<()> {
     check_binary("git").context("'git' is required")?;
-    check_binary("tmux").context("'tmux' is required")?;
+    check_binary("zmx").context("'zmx' is required")?;
     Ok(())
 }
