@@ -76,3 +76,111 @@ pub fn run_list(config: &Config) -> Result<()> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// refresh
+// ---------------------------------------------------------------------------
+
+/// Fetch the latest remote refs into a project's bare clone so the next
+/// `spawn --base origin/<branch>` starts from the up-to-date tip. With no
+/// project, refresh every registered project.
+pub fn run_refresh(config: &Config, project: Option<&str>) -> Result<()> {
+    if let Some(name) = project {
+        if !config.store.project_exists(name)? {
+            bail!("project '{name}' not found; run 'nixsand project add <git-url>' first");
+        }
+        refresh_one(config, name)?;
+    } else {
+        let projects = config.store.list_projects()?;
+        if projects.is_empty() {
+            println!("no projects registered; run 'nixsand project add <git-url>' to add one");
+            return Ok(());
+        }
+        for (name, _) in &projects {
+            refresh_one(config, name)?;
+        }
+    }
+    Ok(())
+}
+
+fn refresh_one(config: &Config, name: &str) -> Result<()> {
+    let bare_dir = config.bare_repo_dir(name);
+    config
+        .git
+        .fetch_prune(&bare_dir)
+        .with_context(|| format!("failed to refresh project '{name}'"))?;
+    println!("refreshed '{name}'");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::mock::{MockGitBackend, MockZmxBackend};
+    use crate::store::Store;
+    use tempfile::TempDir;
+
+    /// A Config backed by mocks + an in-memory store. The returned git mock
+    /// is `Arc`-backed and shares state with the copy inside `config`, so
+    /// recorded calls are observable through it. Keep `_tmp` alive.
+    struct Harness {
+        config: Config,
+        git: MockGitBackend,
+        _tmp: TempDir,
+    }
+
+    fn harness() -> Harness {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let git = MockGitBackend::new();
+        let config = Config {
+            home: tmp.path().to_path_buf(),
+            store,
+            git: Box::new(git.clone()),
+            zmx: Box::new(MockZmxBackend::new()),
+        };
+        Harness { config, git, _tmp: tmp }
+    }
+
+    #[test]
+    fn refresh_fetches_the_named_project() {
+        let h = harness();
+        h.config
+            .store
+            .add_project("proj", "https://example.com/proj.git")
+            .unwrap();
+        run_refresh(&h.config, Some("proj")).unwrap();
+        let bare = h.config.bare_repo_dir("proj");
+        assert!(
+            h.git
+                .recorded_calls()
+                .contains(&format!("fetch_prune:{}", bare.display())),
+            "calls: {:?}",
+            h.git.recorded_calls()
+        );
+    }
+
+    #[test]
+    fn refresh_unknown_project_errors() {
+        let h = harness();
+        let err = run_refresh(&h.config, Some("nope")).unwrap_err();
+        assert!(err.to_string().contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn refresh_all_fetches_every_project() {
+        let h = harness();
+        h.config
+            .store
+            .add_project("a", "https://example.com/a.git")
+            .unwrap();
+        h.config
+            .store
+            .add_project("b", "https://example.com/b.git")
+            .unwrap();
+        run_refresh(&h.config, None).unwrap();
+        let calls = h.git.recorded_calls();
+        let fetches = calls.iter().filter(|c| c.starts_with("fetch_prune:")).count();
+        assert_eq!(fetches, 2, "calls: {calls:?}");
+    }
+}

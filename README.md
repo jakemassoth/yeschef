@@ -21,6 +21,7 @@ in a window (`claude`, `codex`, `aider`, …), so nothing is tied to a particula
 ```bash
 nixsand init                                  # ~/.nixsand + AGENTS.md
 nixsand project add <git-url> [name]          # bare clone + worktrees dir
+nixsand refresh [<project>]                   # git fetch --prune (all projects if omitted)
 
 # dispatch a crewmate: worktree + tmux window + agent
 nixsand spawn <project> <branch> -p "Implement X and summarize what changed"

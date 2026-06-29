@@ -20,6 +20,9 @@ pub trait GitBackend: Send + Sync {
     /// Remove a worktree registration (and prune stale metadata).
     fn remove_worktree(&self, bare_repo: &Path, worktree_path: &Path) -> Result<()>;
     fn default_branch(&self, bare_repo: &Path) -> Result<String>;
+    /// Fetch the latest refs from `origin` into the bare clone, pruning
+    /// deleted remote branches.
+    fn fetch_prune(&self, bare_repo: &Path) -> Result<()>;
 }
 
 /// Liveness/identity info for a single task window.

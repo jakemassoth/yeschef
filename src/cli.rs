@@ -22,6 +22,12 @@ pub enum Commands {
     /// Manage projects (add / list)
     Project(ProjectArgs),
 
+    /// Fetch the latest remote refs into a project's bare clone
+    Refresh {
+        /// Project to refresh (omit to refresh all registered projects)
+        project: Option<String>,
+    },
+
     /// Create a worktree and launch an agent in a zmx session
     Spawn {
         /// Project name

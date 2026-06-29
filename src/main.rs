@@ -42,6 +42,11 @@ fn run(cli: Cli) -> Result<()> {
             }
             return Ok(());
         }
+        Commands::Refresh { project } => {
+            let config = Config::load()?;
+            project::run_refresh(&config, project.as_deref())?;
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -81,7 +86,9 @@ fn run(cli: Cli) -> Result<()> {
             branch,
             rm_worktree,
         } => orchestrate::run_kill(&config, &project, &branch, rm_worktree)?,
-        Commands::Init | Commands::Project(_) => unreachable!("handled above"),
+        Commands::Init | Commands::Project(_) | Commands::Refresh { .. } => {
+            unreachable!("handled above")
+        }
     }
     Ok(())
 }

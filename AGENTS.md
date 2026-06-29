@@ -44,6 +44,7 @@ Pick one and use it consistently. The examples below use the bare `nixsand` form
 |---|---|
 | `nixsand project add <git-url> [name]` | Register a project (bare clone + worktrees dir). |
 | `nixsand project list` | List registered projects. |
+| `nixsand refresh [<project>]` | Fetch latest remote refs into a project's bare clone (all projects if omitted), so the next `spawn --base origin/main` starts from the up-to-date tip. |
 | `nixsand spawn <project> <branch> [--base <ref>] [--agent <cmd>] [-p "<prompt>"]` | Create the worktree, open a tmux window, launch the agent. |
 | `nixsand send <project> <branch> <text...>` | Send one line of guidance to the agent (followed by Enter). |
 | `nixsand peek <project> <branch> [-n <lines>]` | Print the recent output of the agent's pane. |

@@ -109,6 +109,19 @@ impl GitBackend for RealGitBackend {
         Ok(())
     }
 
+    fn fetch_prune(&self, bare_repo: &Path) -> Result<()> {
+        let status = Command::new("git")
+            .args(["-C"])
+            .arg(bare_repo)
+            .args(["fetch", "--prune", "origin"])
+            .status()
+            .context("failed to run 'git fetch --prune origin'")?;
+        if !status.success() {
+            bail!("git fetch --prune origin failed");
+        }
+        Ok(())
+    }
+
     fn default_branch(&self, bare_repo: &Path) -> Result<String> {
         let output = Command::new("git")
             .args(["-C"])

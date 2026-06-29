@@ -80,6 +80,11 @@ impl GitBackend for MockGitBackend {
         self.record(format!("default_branch:{}", bare_repo.display()));
         Ok(self.default_branch_response.lock().unwrap().clone())
     }
+
+    fn fetch_prune(&self, bare_repo: &Path) -> Result<()> {
+        self.record(format!("fetch_prune:{}", bare_repo.display()));
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
