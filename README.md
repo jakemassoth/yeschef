@@ -14,7 +14,8 @@ in a zmx session (`claude`, `codex`, `aider`, …), so nothing is tied to a part
 
 ## Requirements
 
-`git` and `zmx` on your `PATH`. That's it — no containers, no Nix, no macOS requirement.
+`git` and `zmx` on your `PATH`, plus either Nix or Rust/Cargo to run yeschef itself from
+source (see [Running yeschef](#running-yeschef)). No containers, no macOS requirement.
 
 ## Workflow
 
@@ -36,17 +37,20 @@ yeschef kill  <project> <branch> --rm-worktree
 `spawn --agent <cmd>` chooses the harness (default `claude`); `-p/--prompt` is passed as
 the agent's first argument.
 
-The examples above use the bare `yeschef` form (an installed binary on `PATH`). If instead
-you run from a source checkout — the canonical one lives at **`~/.yeschef/yeschef-src`** —
-point `nix run` at that path so it works from any directory and always runs the latest
-source there:
+## Running yeschef
+
+yeschef is never installed or on your `PATH`. The bare `yeschef <args>` written above (and
+throughout `AGENTS.md`) is **shorthand** — you always run it from the canonical source
+checkout at **`~/.yeschef/yeschef-src`**, which works from any directory and always runs
+the latest source there:
 
 ```bash
-nix run ~/.yeschef/yeschef-src -- <args>    # e.g. ... -- spawn <project> <branch> -p "..."
+nix run ~/.yeschef/yeschef-src -- <args>                          # reproducible default
+cargo run --manifest-path ~/.yeschef/yeschef-src/Cargo.toml -- <args>   # faster for tight loops
 ```
 
-Run your head chef agent from `~/.yeschef` so it loads `AGENTS.md` — the manual that
-describes the dispatch → supervise → land → teardown loop.
+`AGENTS.md` is the head chef's manual — the dispatch → supervise → land → teardown loop.
+`yeschef init` writes a copy to `~/.yeschef/`, and it also ships in the source checkout.
 
 ## Development
 

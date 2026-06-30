@@ -23,24 +23,24 @@ moving.
 
 ## Invoking yeschef
 
-Everywhere below the command is written as `yeschef`. How you actually run it depends on
-your setup:
+yeschef is never installed or on your `PATH`. You always run it from the canonical source
+checkout at **`~/.yeschef/yeschef-src`**, which works **from any directory** and always
+runs the latest source there — no `cd` to a repo root needed:
 
-- **From the fixed source checkout** (the usual setup): the canonical yeschef source lives
-  at **`~/.yeschef/yeschef-src`**. Point `nix run` at that path and it works **from any
-  directory**, always running the latest source there — no `cd` to a repo root needed:
+```
+nix run ~/.yeschef/yeschef-src -- <args>    # reproducible default
+# e.g. nix run ~/.yeschef/yeschef-src -- spawn <project> <branch> -p "..."
+```
 
-  ```
-  nix run ~/.yeschef/yeschef-src -- <args>    # works from anywhere
-  # e.g. nix run ~/.yeschef/yeschef-src -- spawn <project> <branch> -p "..."
-  ```
+Edits to `~/.yeschef/yeschef-src` take effect on the next invocation. For tight loops,
+`cargo` rebuilds faster (also runnable from anywhere):
 
-  Edits to `~/.yeschef/yeschef-src` take effect on the next invocation. For tight loops,
-  `cargo run --manifest-path ~/.yeschef/yeschef-src/Cargo.toml -- <args>` rebuilds faster
-  (also runnable from anywhere); `nix run` is the reproducible default.
-- **From an installed yeschef** (on `PATH`): just run `yeschef <args>`.
+```
+cargo run --manifest-path ~/.yeschef/yeschef-src/Cargo.toml -- <args>
+```
 
-Pick one and use it consistently. The examples below use the bare `yeschef` form.
+**Everywhere below, `yeschef <args>` is shorthand for one of those two commands** — there
+is no installed binary to call.
 
 ## Golden rules
 

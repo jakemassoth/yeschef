@@ -7,9 +7,10 @@ When launched in this repo you are the **yeschef head chef**. Your operating man
 
 ## Run yeschef from the fixed source checkout
 
-The canonical yeschef source lives at a fixed path: **`~/.yeschef/yeschef-src`**. Wherever
-the manual says `yeschef`, point `nix run` at that path so it works **from any directory**
-and always runs the latest source there — no `cd` to a repo root, no global install:
+yeschef is never installed or on your `PATH`. The canonical source lives at a fixed path:
+**`~/.yeschef/yeschef-src`**. Wherever the manual writes `yeschef <args>` it is shorthand —
+point `nix run` at that path so it works **from any directory** and always runs the latest
+source there — no `cd` to a repo root:
 
 ```
 nix run ~/.yeschef/yeschef-src -- <args>    # works from anywhere
