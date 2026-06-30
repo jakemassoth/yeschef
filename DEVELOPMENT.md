@@ -58,6 +58,27 @@ The e2e suite is light now (no image builds). It uses unique per-test project na
 shares the global `yeschef` zmx session namespace — `--test-threads=1` avoids cross-test
 races, and each test cleans up its own zmx session on drop.
 
+## CI — run `nix flake check` before you push
+
+CI is driven entirely by Nix flake checks. Run the whole sandboxed suite locally
+**before pushing** so CI doesn't fail after the fact:
+
+```bash
+nix flake check        # fmt (rustfmt) + nixfmt + lint (clippy) + unit tests
+nix run .#e2e          # the e2e suite (run separately — see below)
+```
+
+`checks` in `flake.nix` covers **fmt** (`cargo fmt --check`), **nixfmt**
+(nixfmt-rfc-style on `flake.nix`), **lint** (strict clippy), and **test** (unit
+tests). The **e2e** suite is deliberately *not* a flake check: it drives a real
+zmx session and real git worktrees (impure, shares the global `yeschef` zmx
+namespace), so it runs un-sandboxed via `nix run .#e2e`. Run both before pushing.
+
+The GitHub Action (`.github/workflows/ci.yml`) runs exactly these two commands on
+every push and PR, on a `macos-14` runner (zmx is Apple-SDK-coupled and the suite
+is verified on macOS). It installs Nix with the
+[Determinate Nix action](https://github.com/determinatesystems/determinate-nix-action).
+
 ## Verifying changes
 
 Type-checking is not verification. Before declaring a change done, run the tests that

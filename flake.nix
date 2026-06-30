@@ -18,15 +18,27 @@
     zmx-flake.url = "github:thrawny/zmx-flake";
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay, naersk, zmx-flake }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+      rust-overlay,
+      naersk,
+      zmx-flake,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
         # The zmx binary the backend shells out to at runtime.
         zmx = zmx-flake.packages.${system}.default;
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
-          extensions = [ "rust-src" "rust-analyzer" ];
+          extensions = [
+            "rust-src"
+            "rust-analyzer"
+          ];
         };
         naersk' = pkgs.callPackage naersk {
           cargo = rustToolchain;
@@ -72,17 +84,68 @@
 
         apps.e2e = {
           type = "app";
-          program = toString (pkgs.writeShellScript "yeschef-e2e" ''
-            set -euo pipefail
-            export PATH="${zmx}/bin:$PATH"
-            for bin in git zmx; do
-              if ! command -v "$bin" >/dev/null 2>&1; then
-                echo "error: '$bin' not found in PATH; e2e tests require it" >&2
-                exit 1
-              fi
-            done
-            exec ${rustToolchain}/bin/cargo test --test e2e -- --ignored --test-threads=1 "$@"
-          '');
+          program = toString (
+            pkgs.writeShellScript "yeschef-e2e" ''
+              set -euo pipefail
+              export PATH="${zmx}/bin:$PATH"
+              for bin in git zmx; do
+                if ! command -v "$bin" >/dev/null 2>&1; then
+                  echo "error: '$bin' not found in PATH; e2e tests require it" >&2
+                  exit 1
+                fi
+              done
+              exec ${rustToolchain}/bin/cargo test --test e2e -- --ignored --test-threads=1 "$@"
+            ''
+          );
+        };
+
+        # nix flake check — the CI suite, all sandboxed builds.
+        #
+        # Covered here: fmt (rustfmt), nixfmt, lint (clippy), test (unit). These
+        # are pure and run cleanly in the Nix sandbox.
+        #
+        # NOT covered here: the e2e suite. It is intentionally kept out of
+        # `nix flake check` and run as a separate `nix run .#e2e` CI step. Two
+        # reasons:
+        #   1. e2e drives a REAL zmx session and REAL git worktrees, sharing the
+        #      global `yeschef` zmx session namespace and spawning detached zmx
+        #      daemons. That is an impure integration test, not a hermetic build.
+        #   2. naersk's test mode can't cleanly run the `#[ignore]`d e2e tests:
+        #      its deps-only build phase replays the same `cargo test` options
+        #      against a dummy src that has no `e2e` target and fails. Forcing it
+        #      would mean a bespoke build derivation duplicating naersk's vendoring.
+        # zmx itself does run in the sandbox, but the above make a separate
+        # un-sandboxed `nix run .#e2e` step the right home for the suite.
+        checks = {
+          # rustfmt is the formatter; `cargo fmt --check` IS the formatting check.
+          fmt =
+            pkgs.runCommand "check-fmt"
+              {
+                nativeBuildInputs = [ rustToolchain ];
+              }
+              ''
+                cd ${./.}
+                export HOME="$TMPDIR"
+                cargo fmt --all --check
+                touch $out
+              '';
+
+          # nixfmt-rfc-style on the flake itself (cheap, keeps the .nix tidy).
+          nixfmt =
+            pkgs.runCommand "check-nixfmt"
+              {
+                nativeBuildInputs = [ pkgs.nixfmt-rfc-style ];
+              }
+              ''
+                nixfmt --check ${./flake.nix}
+                touch $out
+              '';
+
+          # clippy strict (-D warnings -D clippy::pedantic) — reuse the package.
+          lint = self.packages.${system}.clippy;
+
+          # unit tests (e2e tests are #[ignore]d, so they compile but don't run).
+          test = self.packages.${system}.test;
         };
 
         devShells.default = pkgs.mkShell {
@@ -94,5 +157,6 @@
 
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
         };
-      });
+      }
+    );
 }

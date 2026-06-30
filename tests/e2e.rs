@@ -637,7 +637,10 @@ fn cleanup_yes_reaps_merged_ticket() {
         .stdout(predicate::str::contains(format!("{name}/demo")));
 
     // Session, worktree, and registry entry are all gone.
-    assert!(!window_exists(&window), "window should be killed by cleanup");
+    assert!(
+        !window_exists(&window),
+        "window should be killed by cleanup"
+    );
     let worktree = env
         .home_path()
         .join("projects")

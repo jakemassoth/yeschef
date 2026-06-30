@@ -63,9 +63,7 @@ pub fn run_cleanup(config: &Config, project: Option<&str>, yes: bool) -> Result<
             let status = config
                 .git
                 .branch_status(&bare_dir, &ticket.branch, &main_ref)
-                .with_context(|| {
-                    format!("failed to classify branch '{name}/{}'", ticket.branch)
-                })?;
+                .with_context(|| format!("failed to classify branch '{name}/{}'", ticket.branch))?;
 
             let reason = match status {
                 BranchStatus::Merged => "merged",
@@ -129,7 +127,12 @@ fn reap_ticket(config: &Config, session: &str, project: &str, ticket: &TicketRow
     config
         .git
         .remove_worktree(&bare_dir, &worktree_path)
-        .with_context(|| format!("failed to remove worktree for '{project}/{}'", ticket.branch))?;
+        .with_context(|| {
+            format!(
+                "failed to remove worktree for '{project}/{}'",
+                ticket.branch
+            )
+        })?;
     config
         .git
         .delete_branch(&bare_dir, &ticket.branch)
@@ -200,7 +203,12 @@ mod tests {
         run_cleanup(&h.config, Some("proj"), true).unwrap();
 
         // Ticket is gone from the registry.
-        assert!(h.config.store.lookup_ticket("proj", "done").unwrap().is_none());
+        assert!(h
+            .config
+            .store
+            .lookup_ticket("proj", "done")
+            .unwrap()
+            .is_none());
 
         // The full teardown path ran: kill window, remove worktree, delete branch.
         let zmx = h.zmx.recorded_calls();
@@ -214,7 +222,8 @@ mod tests {
             "git calls: {git:?}"
         );
         assert!(
-            git.iter().any(|c| c.starts_with("delete_branch:") && c.ends_with(":done")),
+            git.iter()
+                .any(|c| c.starts_with("delete_branch:") && c.ends_with(":done")),
             "git calls: {git:?}"
         );
     }
@@ -244,7 +253,12 @@ mod tests {
         run_cleanup(&h.config, Some("proj"), true).unwrap();
 
         // Ticket survives, and no teardown ran for it.
-        assert!(h.config.store.lookup_ticket("proj", "wip").unwrap().is_some());
+        assert!(h
+            .config
+            .store
+            .lookup_ticket("proj", "wip")
+            .unwrap()
+            .is_some());
         let git = h.git.recorded_calls();
         assert!(
             !git.iter().any(|c| c.starts_with("remove_worktree:")),
@@ -266,7 +280,12 @@ mod tests {
         run_cleanup(&h.config, Some("proj"), false).unwrap();
 
         // Default (no --yes) is a dry run: the ticket and its resources stay.
-        assert!(h.config.store.lookup_ticket("proj", "done").unwrap().is_some());
+        assert!(h
+            .config
+            .store
+            .lookup_ticket("proj", "done")
+            .unwrap()
+            .is_some());
         let git = h.git.recorded_calls();
         assert!(
             git.iter().any(|c| c.starts_with("branch_status:")),
@@ -276,12 +295,11 @@ mod tests {
             !git.iter().any(|c| c.starts_with("remove_worktree:")),
             "dry run must not remove worktrees; git calls: {git:?}"
         );
-        assert!(
-            !h.zmx
-                .recorded_calls()
-                .iter()
-                .any(|c| c.starts_with("kill_window:"))
-        );
+        assert!(!h
+            .zmx
+            .recorded_calls()
+            .iter()
+            .any(|c| c.starts_with("kill_window:")));
     }
 
     #[test]
@@ -295,7 +313,10 @@ mod tests {
         let git = h.git.recorded_calls();
         let fetch_idx = git.iter().position(|c| c.starts_with("fetch_prune:"));
         let status_idx = git.iter().position(|c| c.starts_with("branch_status:"));
-        assert!(fetch_idx.is_some(), "expected a fetch_prune; calls: {git:?}");
+        assert!(
+            fetch_idx.is_some(),
+            "expected a fetch_prune; calls: {git:?}"
+        );
         assert!(
             fetch_idx < status_idx,
             "fetch must precede classification; calls: {git:?}"

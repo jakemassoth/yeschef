@@ -49,12 +49,8 @@ pub trait GitBackend: Send + Sync {
     /// (`main_ref`, e.g. `origin/main`) so `cleanup` can decide whether to
     /// reap it. Must not mutate the repo. Run `fetch_prune` first so the
     /// merged / gone determination reflects the latest remote state.
-    fn branch_status(
-        &self,
-        bare_repo: &Path,
-        branch: &str,
-        main_ref: &str,
-    ) -> Result<BranchStatus>;
+    fn branch_status(&self, bare_repo: &Path, branch: &str, main_ref: &str)
+        -> Result<BranchStatus>;
 }
 
 /// Liveness/identity info for a single ticket window.

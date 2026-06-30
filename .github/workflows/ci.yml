@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ci:
+    name: nix flake check + e2e
+    # Runs on macOS (Apple Silicon = aarch64-darwin):
+    #   - zmx is tightly coupled to the Apple SDK (see flake.nix). It evaluates
+    #     for x86_64-linux and has no darwin-only deps there, so an ubuntu runner
+    #     is plausible — but the whole suite is verified to build and pass on
+    #     macOS, and zmx is developed/used there, so we stay on the verified
+    #     platform. To move to ubuntu later, switch to `ubuntu-latest` and
+    #     re-verify that zmx (hence the e2e step) builds on linux.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        with:
+          # Pull the prebuilt zmx from its binary cache instead of a slow
+          # zig-from-source build. Harmless if the cache lacks this build.
+          extra-conf: |
+            extra-substituters = https://zmx.cachix.org
+            extra-trusted-public-keys = zmx.cachix.org-1:9E7zdDiSiG9PnSl8RFHbZ3AW2NmIy/7SPK9rRwed7r4=
+
+      # Sandboxed CI suite: fmt (rustfmt), nixfmt, lint (clippy), test (unit).
+      - name: nix flake check
+        run: nix flake check -L
+
+      # The e2e suite is intentionally NOT a sandboxed flake check: it drives a
+      # REAL zmx session and REAL git worktrees, sharing the global `yeschef`
+      # zmx namespace and spawning detached daemons. Run it un-sandboxed here.
+      - name: e2e
+        run: nix run .#e2e
