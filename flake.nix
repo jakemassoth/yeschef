@@ -84,24 +84,25 @@
 
         apps.e2e = {
           type = "app";
-          program = toString (
-            pkgs.writeShellScript "yeschef-e2e" ''
-              set -euo pipefail
-              # Prepend the pinned toolchain so BOTH cargo and the `rustc` it
-              # shells out to come from nix. Without rustToolchain on PATH, cargo
-              # resolves `rustc` to whatever is on PATH — on a clean CI runner
-              # that is a rustup shim, which tries to auto-install a toolchain and
-              # corrupts itself under concurrent build scripts.
-              export PATH="${rustToolchain}/bin:${zmx}/bin:$PATH"
-              for bin in git zmx; do
-                if ! command -v "$bin" >/dev/null 2>&1; then
-                  echo "error: '$bin' not found in PATH; e2e tests require it" >&2
-                  exit 1
-                fi
-              done
-              exec cargo test --test e2e -- --ignored --test-threads=1 "$@"
-            ''
-          );
+          # writeShellApplication puts runtimeInputs on PATH for us (no manual
+          # `export PATH`). All three tools come from nix so the run is
+          # self-contained: the pinned toolchain provides cargo AND the `rustc`
+          # it shells out to (resolving rustc from an ambient rustup shim on a
+          # clean CI runner corrupts the toolchain under concurrent builds), and
+          # git + zmx are guaranteed present without an existence check.
+          program = "${
+            pkgs.writeShellApplication {
+              name = "yeschef-e2e";
+              runtimeInputs = [
+                rustToolchain
+                zmx
+                pkgs.git
+              ];
+              text = ''
+                exec cargo test --test e2e -- --ignored --test-threads=1 "$@"
+              '';
+            }
+          }/bin/yeschef-e2e";
         };
 
         # nix flake check — the CI suite, all sandboxed builds.

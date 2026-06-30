@@ -16,7 +16,7 @@ jobs:
     #     re-verify that zmx (hence the e2e step) builds on linux.
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Determinate Nix
         uses: DeterminateSystems/determinate-nix-action@v3
