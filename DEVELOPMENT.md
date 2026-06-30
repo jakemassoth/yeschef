@@ -86,6 +86,14 @@ Command logic lives in `src/commands/`:
 - `orchestrate.rs` — `spawn`, `send`, `peek`, `status`, `kill`, `attach`. `spawn` is the
   meaty one: creates the worktree (guarded by `RollbackGuard`), ensures the tmux session,
   opens a window running the agent at the worktree, and registers the task in SQLite.
+  The `-p` prompt is **never inlined** on the launch command line — a long prompt would
+  overflow the OS arg-length limit and the agent harness, treating the giant positional
+  arg as a path, dies with `ENAMETOOLONG`. Instead `spawn` writes the prompt to
+  `~/.nixsand/prompts/<project>-<sanitized-branch>.md` (a stable path outside the worktree,
+  so it can't be committed; overwritten on re-spawn) and launches the agent with a short
+  `Read the task brief at <abs-path> and carry it out start to finish.` instruction. This
+  is always-file (no size threshold — simpler, and correct for every prompt length) and
+  agent-agnostic, since every agent takes an initial instruction as its positional arg.
 
 State is persisted in SQLite (`~/.nixsand/nixsand.db`, via `src/store.rs`). Two tables:
 `projects` (name, git_url) and `branches` — the task registry — (project, branch,

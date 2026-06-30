@@ -294,10 +294,23 @@ fn spawn_creates_worktree_and_live_window() {
     let window = format!("{name}-demo");
     let _cleanup = WindowCleanup(vec![window.clone()]);
 
-    // `sh -c` as a stand-in agent: it takes the prompt as a command (mirroring
-    // how a real agent takes the prompt as its first arg) and stays alive.
+    // The prompt is no longer passed inline; spawn writes it to a file and
+    // hands the agent a short "read this file" instruction (guards against the
+    // ENAMETOOLONG bug on long prompts). The stand-in agent is a shell program
+    // that echoes a liveness marker, prints the instruction it received (which
+    // arrives as `$0`), and stays alive — mirroring how a real agent takes the
+    // instruction as its first positional arg.
+    let prompt_body = "PROMPT_BODY_MARKER: refactor the widget subsystem.";
     env.cmd()
-        .args(["spawn", &name, "demo", "--agent", "sh -c", "-p", "echo SPAWN_OK; sleep 30"])
+        .args([
+            "spawn",
+            &name,
+            "demo",
+            "--agent",
+            "sh -c 'echo SPAWN_OK; echo \"$0\"; sleep 30'",
+            "-p",
+            prompt_body,
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("spawned"));
@@ -311,15 +324,28 @@ fn spawn_creates_worktree_and_live_window() {
         .join("demo");
     assert!(worktree.is_dir(), "worktree should exist at {}", worktree.display());
 
+    // The prompt was written to a file under the nixsand home (outside the
+    // worktree, so it can't be committed) and holds the full prompt verbatim.
+    let prompt_file = env.home_path().join("prompts").join(format!("{name}-demo.md"));
+    assert!(prompt_file.is_file(), "prompt file should exist at {}", prompt_file.display());
+    assert!(!prompt_file.starts_with(&worktree), "prompt file must live outside the worktree");
+    let written = std::fs::read_to_string(&prompt_file).unwrap();
+    assert_eq!(written, prompt_body);
+
     // zmx session is live.
     assert!(window_exists(&window), "zmx session for '{window}' should exist");
 
-    // Give the shell a moment to echo, then peek should show the output.
+    // Give the shell a moment to echo, then peek should show the marker and the
+    // file-indirection instruction the agent was launched with.
     std::thread::sleep(std::time::Duration::from_millis(800));
     let pane = capture(&window);
     assert!(
         pane.contains("SPAWN_OK"),
-        "pane should show the prompt's output; got:\n{pane}"
+        "pane should show the agent's output; got:\n{pane}"
+    );
+    assert!(
+        pane.contains("Read the task brief at"),
+        "pane should show the read-this-file instruction; got:\n{pane}"
     );
 
     // status lists the task as running.

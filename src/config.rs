@@ -60,6 +60,12 @@ impl Config {
     pub fn worktree_dir(&self, project: &str, branch: &str) -> PathBuf {
         self.worktrees_dir(project).join(branch)
     }
+
+    /// Directory holding per-task spawn prompt files. Lives under the nixsand
+    /// home (outside any project worktree) so prompts can't be committed.
+    pub fn prompts_dir(&self) -> PathBuf {
+        self.home.join("prompts")
+    }
 }
 
 /// Resolve the nixsand home directory.

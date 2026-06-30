@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::config::Config;
@@ -12,6 +14,24 @@ const PEEK_LINES: usize = 40;
 /// escaping any embedded single quotes.
 fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Write the spawn prompt to a stable per-task file outside the worktree and
+/// return its absolute path. Keyed by project/sanitized-branch so a re-spawn
+/// overwrites rather than accumulating stale files.
+fn write_prompt_file(
+    config: &Config,
+    project: &str,
+    sanitized: &str,
+    prompt: &str,
+) -> Result<PathBuf> {
+    let dir = config.prompts_dir();
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create prompts dir at {}", dir.display()))?;
+    let path = dir.join(format!("{project}-{sanitized}.md"));
+    std::fs::write(&path, prompt)
+        .with_context(|| format!("failed to write prompt file at {}", path.display()))?;
+    Ok(path)
 }
 
 /// Resolve a registered task, returning a clear error if it doesn't exist.
@@ -98,8 +118,22 @@ pub fn run_spawn(
     }
 
     // 2. Launch the agent in a fresh tmux window rooted at the worktree.
+    //
+    // The prompt is never passed inline: a long prompt (a few paragraphs) blows
+    // past the OS arg-length limit and the agent harness, treating the giant
+    // positional arg as a path, dies with `ENAMETOOLONG`. Instead we write the
+    // prompt to a file outside the worktree and hand the agent a short
+    // instruction to read it. This stays agent-agnostic — claude/codex/aider all
+    // take an initial instruction as their positional arg.
     let command = match prompt {
-        Some(p) => format!("{agent} {}", shell_single_quote(p)),
+        Some(p) => {
+            let prompt_path = write_prompt_file(config, project, &sanitized, p)?;
+            let instruction = format!(
+                "Read the task brief at {} and carry it out start to finish.",
+                prompt_path.display()
+            );
+            format!("{agent} {}", shell_single_quote(&instruction))
+        }
         None => agent.to_string(),
     };
     config
@@ -299,13 +333,52 @@ mod tests {
         assert_eq!(task.window, "proj-feature-x");
         assert_eq!(task.agent, "claude");
 
-        // The window was created with the prompt appended as a quoted arg.
+        // The window launches the agent with a short "read this file"
+        // instruction rather than the prompt inlined on the command line.
         let calls = h.zmx.recorded_calls();
         assert!(
             calls.iter().any(|c| c.starts_with("new_window:nixsand:proj-feature-x:")
-                && c.ends_with("claude 'do it'")),
+                && c.contains("claude 'Read the task brief at ")
+                && c.contains("carry it out start to finish.'")),
             "calls: {calls:?}"
         );
+    }
+
+    #[test]
+    fn spawn_writes_long_prompt_to_file_not_inline() {
+        let h = harness(MockZmxBackend::new());
+        // A multi-paragraph prompt that would overflow the arg-length limit if
+        // passed inline (the ENAMETOOLONG bug this guards against).
+        let long_prompt = "Refactor the widget subsystem.\n\n".repeat(500);
+        run_spawn(&h.config, "proj", "feature/x", None, "claude", Some(&long_prompt)).unwrap();
+
+        let calls = h.zmx.recorded_calls();
+        let launch = calls
+            .iter()
+            .find(|c| c.starts_with("new_window:nixsand:proj-feature-x:"))
+            .expect("expected a new_window call");
+
+        // The raw prompt must NOT appear inline on the launched command.
+        assert!(
+            !launch.contains("Refactor the widget subsystem"),
+            "prompt leaked onto the command line: {launch}"
+        );
+
+        // The command references the prompt file by absolute path.
+        let prompt_path = h.config.prompts_dir().join("proj-feature-x.md");
+        assert!(
+            launch.contains(&prompt_path.display().to_string()),
+            "command does not reference the prompt file: {launch}"
+        );
+
+        // The file lives outside the worktree and holds the full prompt verbatim.
+        assert!(
+            !prompt_path.starts_with(h.config.worktree_dir("proj", "feature/x")),
+            "prompt file must live outside the worktree: {}",
+            prompt_path.display()
+        );
+        let written = std::fs::read_to_string(&prompt_path).unwrap();
+        assert_eq!(written, long_prompt);
     }
 
     #[test]

@@ -98,14 +98,20 @@ For each piece of work the human gives you:
   suggestion — not something the crewmate typed or will run, and it does not matter. A
   real `nixsand send` overrides it; don't try to clear it with Escape/Ctrl-U/backspace
   (those won't touch it because the buffer is actually empty).
+- **Long prompts are safe — they're delivered via a file, not the command line.**
+  `spawn` writes your `-p` prompt to `~/.nixsand/prompts/<project>-<sanitized-branch>.md`
+  and launches the agent with a short `Read the task brief at <that-path> and carry it out
+  start to finish.` instruction. So multi-paragraph prompts work fine (no `ENAMETOOLONG`
+  failure), and the brief survives on disk if you need to re-point the agent at it.
 - **First launch may need a confirmation — and it can swallow your prompt.** The
   first time an agent launches in a fresh worktree (or the first ever on a machine),
   Claude Code may show a trust-folder or bypass-permissions dialog. After every
   `spawn`, `peek` the pane within ~20 seconds. If such a dialog is showing, accept it
   with `nixsand send <project> <branch> "1"` (or whatever choice the dialog requires)
   and verify the agent started processing. Accepting the dialog usually swallows the
-  initial `-p` prompt, so once the agent is idle at its input box, re-send the prompt
-  with `nixsand send`.
+  initial instruction, so once the agent is idle at its input box, re-send it — e.g.
+  `nixsand send <project> <branch> "Read the task brief at ~/.nixsand/prompts/<project>-<branch>.md and carry it out start to finish."`
+  (the prompt file is still there from `spawn`).
 
 ## Working on nixsand itself
 
