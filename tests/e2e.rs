@@ -212,6 +212,95 @@ fn project_add_registers_bare_clone() {
         .stdout(predicate::str::contains(&name));
 }
 
+/// Run `git` in a bare repo and return trimmed stdout, asserting success.
+fn git_out(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap_or_else(|_| panic!("git {args:?} failed to spawn"));
+    assert!(
+        out.status.success(),
+        "git {args:?} exited non-zero: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+#[ignore = "requires git + zmx"]
+fn project_add_makes_origin_main_resolve() {
+    // The core fix: after `project add`, `origin/main` must resolve in the bare
+    // clone so `spawn --base origin/main` and `git rebase origin/main` work.
+    let env = TestEnv::new();
+    env.init();
+    let repo = SampleRepo::new();
+    let name = unique_name();
+
+    env.cmd()
+        .args(["project", "add", &repo.url(), &name])
+        .assert()
+        .success();
+
+    let bare = env.home_path().join("projects").join(&name).join(".bare");
+    // origin/main resolves to the same commit as the local main head.
+    let origin_main = git_out(&bare, &["rev-parse", "origin/main"]);
+    let head_main = git_out(&bare, &["rev-parse", "main"]);
+    assert_eq!(
+        origin_main, head_main,
+        "origin/main should resolve to the fetched tip"
+    );
+    let refs = git_out(&bare, &["for-each-ref", "--format=%(refname)"]);
+    assert!(
+        refs.contains("refs/remotes/origin/main"),
+        "expected remote-tracking ref, got: {refs}"
+    );
+}
+
+#[test]
+#[ignore = "requires git + zmx"]
+fn refresh_repairs_clone_with_no_tracking_refspec() {
+    // Migration path: a bare clone created the old way (no fetch refspec) has no
+    // origin/* refs. `refresh` must repair the refspec and populate them.
+    let env = TestEnv::new();
+    env.init();
+    let repo = SampleRepo::new();
+    let name = unique_name();
+
+    // Simulate a pre-fix registration: clone bare ourselves so no refspec/fetch
+    // happens, then register the name in yeschef via a normal add against a
+    // throwaway path is not possible — instead, add then strip the refspec to
+    // mimic the broken on-disk state of an old clone.
+    env.cmd()
+        .args(["project", "add", &repo.url(), &name])
+        .assert()
+        .success();
+    let bare = env.home_path().join("projects").join(&name).join(".bare");
+    // Tear the clone back down to the broken pre-fix state.
+    git(&bare, &["config", "--unset-all", "remote.origin.fetch"]);
+    git(&bare, &["update-ref", "-d", "refs/remotes/origin/main"]);
+    git(&bare, &["update-ref", "-d", "refs/remotes/origin/HEAD"]);
+    assert!(
+        !Command::new("git")
+            .args(["rev-parse", "origin/main"])
+            .current_dir(&bare)
+            .output()
+            .unwrap()
+            .status
+            .success(),
+        "precondition: origin/main should NOT resolve before refresh"
+    );
+
+    env.cmd().args(["refresh", &name]).assert().success();
+
+    let origin_main = git_out(&bare, &["rev-parse", "origin/main"]);
+    let head_main = git_out(&bare, &["rev-parse", "main"]);
+    assert_eq!(
+        origin_main, head_main,
+        "refresh should repair the refspec and populate origin/main"
+    );
+}
+
 #[test]
 #[ignore = "requires git + zmx"]
 fn project_add_duplicate_name_rejected() {

@@ -81,6 +81,11 @@ impl GitBackend for MockGitBackend {
         Ok(self.default_branch_response.lock().unwrap().clone())
     }
 
+    fn ensure_tracking_refspec(&self, bare_repo: &Path) -> Result<()> {
+        self.record(format!("ensure_tracking_refspec:{}", bare_repo.display()));
+        Ok(())
+    }
+
     fn fetch_prune(&self, bare_repo: &Path) -> Result<()> {
         self.record(format!("fetch_prune:{}", bare_repo.display()));
         Ok(())

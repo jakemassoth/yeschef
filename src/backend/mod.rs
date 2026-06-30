@@ -20,6 +20,12 @@ pub trait GitBackend: Send + Sync {
     /// Remove a worktree registration (and prune stale metadata).
     fn remove_worktree(&self, bare_repo: &Path, worktree_path: &Path) -> Result<()>;
     fn default_branch(&self, bare_repo: &Path) -> Result<String>;
+    /// Configure `origin` to fetch into remote-tracking refs
+    /// (`+refs/heads/*:refs/remotes/origin/*`). A plain `git clone --bare`
+    /// leaves no fetch refspec, so `origin/<branch>` never resolves; setting
+    /// this and fetching makes `origin/main` available. Idempotent — safe to
+    /// call repeatedly to repair clones created before this was set.
+    fn ensure_tracking_refspec(&self, bare_repo: &Path) -> Result<()>;
     /// Fetch the latest refs from `origin` into the bare clone, pruning
     /// deleted remote branches.
     fn fetch_prune(&self, bare_repo: &Path) -> Result<()>;

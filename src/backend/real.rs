@@ -107,6 +107,27 @@ impl GitBackend for RealGitBackend {
         Ok(())
     }
 
+    fn ensure_tracking_refspec(&self, bare_repo: &Path) -> Result<()> {
+        // `--replace-all` collapses any existing fetch refspecs down to the
+        // single remote-tracking one, so a bare clone (which has none) and a
+        // mirror-style clone (`+refs/heads/*:refs/heads/*`) both end up correct.
+        let status = Command::new("git")
+            .args(["-C"])
+            .arg(bare_repo)
+            .args([
+                "config",
+                "--replace-all",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ])
+            .status()
+            .context("failed to run 'git config remote.origin.fetch'")?;
+        if !status.success() {
+            bail!("git config remote.origin.fetch failed");
+        }
+        Ok(())
+    }
+
     fn fetch_prune(&self, bare_repo: &Path) -> Result<()> {
         let status = Command::new("git")
             .args(["-C"])

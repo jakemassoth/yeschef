@@ -50,6 +50,18 @@ pub fn run_add(config: &Config, git_url: &str, name: Option<&str>) -> Result<()>
         .set_config(&bare_dir, "worktree.useRelativePaths", "true")
         .context("failed to configure worktree.useRelativePaths")?;
 
+    // `git clone --bare` leaves no fetch refspec, so `origin/<branch>` never
+    // resolves. Configure remote-tracking refs and fetch so `--base
+    // origin/main` works immediately after add.
+    config
+        .git
+        .ensure_tracking_refspec(&bare_dir)
+        .context("failed to configure origin tracking refspec")?;
+    config
+        .git
+        .fetch_prune(&bare_dir)
+        .context("failed to fetch remote-tracking refs after clone")?;
+
     // Register in DB
     config
         .store
@@ -105,6 +117,13 @@ pub fn run_refresh(config: &Config, project: Option<&str>) -> Result<()> {
 
 fn refresh_one(config: &Config, name: &str) -> Result<()> {
     let bare_dir = config.bare_repo_dir(name);
+    // Repair clones created before tracking refspecs were configured (e.g. a
+    // plain `git clone --bare` with no fetch refspec) so old projects also get
+    // `origin/<branch>` populated by the fetch below.
+    config
+        .git
+        .ensure_tracking_refspec(&bare_dir)
+        .with_context(|| format!("failed to configure tracking refspec for '{name}'"))?;
     config
         .git
         .fetch_prune(&bare_dir)
@@ -161,6 +180,65 @@ mod tests {
                 .contains(&format!("fetch_prune:{}", bare.display())),
             "calls: {:?}",
             h.git.recorded_calls()
+        );
+    }
+
+    #[test]
+    fn refresh_configures_tracking_refspec_before_fetching() {
+        // Old clones (no fetch refspec) must be repaired on refresh: the
+        // refspec is set, then the fetch populates origin/<branch>.
+        let h = harness();
+        h.config
+            .store
+            .add_project("proj", "https://example.com/proj.git")
+            .unwrap();
+        run_refresh(&h.config, Some("proj")).unwrap();
+        let bare = h.config.bare_repo_dir("proj");
+        let calls = h.git.recorded_calls();
+        let refspec_idx = calls
+            .iter()
+            .position(|c| c == &format!("ensure_tracking_refspec:{}", bare.display()))
+            .expect("expected ensure_tracking_refspec call");
+        let fetch_idx = calls
+            .iter()
+            .position(|c| c == &format!("fetch_prune:{}", bare.display()))
+            .expect("expected fetch_prune call");
+        assert!(
+            refspec_idx < fetch_idx,
+            "refspec must be set before fetch: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn add_sets_tracking_refspec_and_fetches() {
+        let h = harness();
+        run_add(&h.config, "https://example.com/proj.git", Some("proj")).unwrap();
+        let bare = h.config.bare_repo_dir("proj");
+        let calls = h.git.recorded_calls();
+        assert!(
+            calls.contains(&format!("ensure_tracking_refspec:{}", bare.display())),
+            "calls: {calls:?}"
+        );
+        assert!(
+            calls.contains(&format!("fetch_prune:{}", bare.display())),
+            "calls: {calls:?}"
+        );
+        // The refspec must be configured before the fetch that relies on it.
+        let clone_idx = calls
+            .iter()
+            .position(|c| c.starts_with("clone_bare:"))
+            .unwrap();
+        let refspec_idx = calls
+            .iter()
+            .position(|c| c == &format!("ensure_tracking_refspec:{}", bare.display()))
+            .unwrap();
+        let fetch_idx = calls
+            .iter()
+            .position(|c| c == &format!("fetch_prune:{}", bare.display()))
+            .unwrap();
+        assert!(
+            clone_idx < refspec_idx && refspec_idx < fetch_idx,
+            "expected clone -> refspec -> fetch order: {calls:?}"
         );
     }
 
