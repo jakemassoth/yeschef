@@ -70,6 +70,9 @@ pub enum Commands {
     /// List all tasks and whether their agents are still running
     Status,
 
+    /// Open an interactive TUI to watch the crew's live output
+    Tui,
+
     /// Attach to a nixsand zmx session to watch the crew
     Attach {
         /// Optional project to select a specific task window

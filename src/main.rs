@@ -11,7 +11,7 @@ use clap::Parser;
 
 use cli::{Cli, Commands, ProjectCommands};
 use config::Config;
-use commands::{orchestrate, project};
+use commands::{orchestrate, project, tui};
 
 fn main() {
     let cli = Cli::parse();
@@ -78,6 +78,7 @@ fn run(cli: Cli) -> Result<()> {
             lines,
         } => orchestrate::run_peek(&config, &project, &branch, lines)?,
         Commands::Status => orchestrate::run_status(&config)?,
+        Commands::Tui => tui::run_tui(&config)?,
         Commands::Attach { project, branch } => {
             orchestrate::run_attach(&config, project.as_deref(), branch.as_deref())?;
         }
