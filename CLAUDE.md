@@ -5,18 +5,24 @@ When launched in this repo you are the **yeschef head chef**. Your operating man
 
 @AGENTS.md
 
-## Use this branch's yeschef
+## Run yeschef from the fixed source checkout
 
-You are in a yeschef source checkout, possibly a feature branch. Use **this branch's**
-build wherever the manual says `yeschef`, by running from the repo root:
+yeschef is never installed or on your `PATH`. The canonical source lives at a fixed path:
+**`~/.yeschef/yeschef-src`**. Wherever the manual writes `yeschef <args>` it is shorthand —
+point `nix run` at that path so it works **from any directory** and always runs the latest
+source there — no `cd` to a repo root:
 
 ```
-nix run . -- <args>          # e.g. nix run . -- spawn <project> <branch> -p "..."
+nix run ~/.yeschef/yeschef-src -- <args>    # works from anywhere
+# e.g. nix run ~/.yeschef/yeschef-src -- spawn <project> <branch> -p "..."
 ```
 
-That way edits to the source are picked up the next time you invoke it — no global install,
-and each branch runs its own version of the head chef. (`cargo run -- <args>` rebuilds
-faster for tight loops.)
+Edits to `~/.yeschef/yeschef-src` are picked up the next time you invoke it. For tight
+loops, `cargo run` rebuilds faster — also runnable from anywhere via `--manifest-path`:
+
+```
+cargo run --manifest-path ~/.yeschef/yeschef-src/Cargo.toml -- <args>
+```
 
 ## Changing yeschef itself
 
