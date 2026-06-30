@@ -8,6 +8,7 @@
 use std::io;
 use std::time::Duration;
 
+use ansi_to_tui::IntoText;
 use anyhow::{Context, Result};
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::crossterm::{
@@ -17,8 +18,8 @@ use ratatui::crossterm::{
 };
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::config::Config;
@@ -173,7 +174,7 @@ fn recapture(config: &Config, app: &mut App) {
     let pane = match app.selected_window() {
         Some(window) => config
             .zmx
-            .capture_pane(yeschef_session(), window, Some(CAPTURE_LINES))
+            .capture_pane_styled(yeschef_session(), window, Some(CAPTURE_LINES))
             .unwrap_or_default(),
         None => String::new(),
     };
@@ -286,16 +287,40 @@ fn render_pane(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         |c| format!(" {}/{} [{}] ", c.project, c.branch, c.state.label()),
     );
     let block = Block::default().title(title).borders(Borders::ALL);
+    let inner = block.inner(area);
+
+    // The pane is raw terminal scrollback: it carries ANSI/SGR escape codes for
+    // colour and styling. Parse them into styled spans so the view renders in
+    // colour instead of showing the codes as mangled text. Fall back to plain
+    // text if a byte stream doesn't parse (e.g. truncated escape sequences).
+    let text = app
+        .pane()
+        .into_text()
+        .unwrap_or_else(|_| Text::raw(app.pane()));
 
     // Anchor to the bottom of the scrollback: scroll past everything that
-    // doesn't fit in the visible area.
-    let visible = usize::from(block.inner(area).height);
-    let total = app.pane().lines().count();
-    let scroll = total.saturating_sub(visible);
+    // doesn't fit. Long lines wrap (see `.wrap` below), so count *wrapped*
+    // rows, not source lines, or the bottom won't actually be in view.
+    let width = usize::from(inner.width).max(1);
+    let visible = usize::from(inner.height);
+    let rows: usize = text
+        .lines
+        .iter()
+        .map(|line| {
+            let w = line.width();
+            if w == 0 {
+                1
+            } else {
+                w.div_ceil(width)
+            }
+        })
+        .sum();
+    let scroll = rows.saturating_sub(visible);
     let scroll_y = u16::try_from(scroll).unwrap_or(u16::MAX);
 
-    let paragraph = Paragraph::new(app.pane())
+    let paragraph = Paragraph::new(text)
         .block(block)
+        .wrap(Wrap { trim: false })
         .scroll((scroll_y, 0));
     frame.render_widget(paragraph, area);
 }

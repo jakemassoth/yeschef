@@ -241,6 +241,25 @@ impl ZmxBackend for MockZmxBackend {
             .unwrap_or_default())
     }
 
+    fn capture_pane_styled(
+        &self,
+        session: &str,
+        window: &str,
+        lines: Option<usize>,
+    ) -> Result<String> {
+        self.record(format!(
+            "capture_pane_styled:{session}:{window}:{}",
+            lines.map_or_else(|| "all".to_string(), |n| n.to_string())
+        ));
+        Ok(self
+            .pane_contents
+            .lock()
+            .unwrap()
+            .get(&format!("{session}:{window}"))
+            .cloned()
+            .unwrap_or_default())
+    }
+
     fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>> {
         self.record(format!("list_windows:{session}"));
         Ok(self

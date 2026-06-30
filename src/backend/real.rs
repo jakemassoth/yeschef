@@ -256,6 +256,35 @@ fn zid(session: &str, window: &str) -> String {
     format!("{session}-{window}")
 }
 
+/// Dump a session's scrollback via `zmx history`, optionally preserving ANSI
+/// styling (`--vt`), trimmed to the last `lines` lines. `zmx history` has no
+/// line-count flag, so we trim ourselves.
+fn zmx_history(id: &str, vt: bool, lines: Option<usize>) -> Result<String> {
+    let mut cmd = Command::new("zmx");
+    cmd.args(["history", id]);
+    if vt {
+        cmd.arg("--vt");
+    }
+    let output = cmd.output().context("failed to run 'zmx history'")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("zmx history failed for '{}': {}", id, stderr.trim());
+    }
+    let full = String::from_utf8_lossy(&output.stdout).into_owned();
+    match lines {
+        Some(n) => {
+            let all: Vec<&str> = full.lines().collect();
+            let start = all.len().saturating_sub(n);
+            let mut tail = all[start..].join("\n");
+            if full.ends_with('\n') {
+                tail.push('\n');
+            }
+            Ok(tail)
+        }
+        None => Ok(full),
+    }
+}
+
 /// List the names of all active zmx sessions (one per line via `zmx ls --short`).
 fn zmx_sessions() -> Result<Vec<String>> {
     let output = Command::new("zmx")
@@ -332,30 +361,16 @@ impl ZmxBackend for RealZmxBackend {
     }
 
     fn capture_pane(&self, session: &str, window: &str, lines: Option<usize>) -> Result<String> {
-        let id = zid(session, window);
-        // `zmx history` dumps the full session scrollback; it has no line-count
-        // flag, so trim to the last N lines ourselves.
-        let output = Command::new("zmx")
-            .args(["history", &id])
-            .output()
-            .context("failed to run 'zmx history'")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("zmx history failed for '{}': {}", id, stderr.trim());
-        }
-        let full = String::from_utf8_lossy(&output.stdout).into_owned();
-        match lines {
-            Some(n) => {
-                let all: Vec<&str> = full.lines().collect();
-                let start = all.len().saturating_sub(n);
-                let mut tail = all[start..].join("\n");
-                if full.ends_with('\n') {
-                    tail.push('\n');
-                }
-                Ok(tail)
-            }
-            None => Ok(full),
-        }
+        zmx_history(&zid(session, window), false, lines)
+    }
+
+    fn capture_pane_styled(
+        &self,
+        session: &str,
+        window: &str,
+        lines: Option<usize>,
+    ) -> Result<String> {
+        zmx_history(&zid(session, window), true, lines)
     }
 
     fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>> {

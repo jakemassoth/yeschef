@@ -78,7 +78,18 @@ pub trait ZmxBackend: Send + Sync {
     /// Send a single line of text followed by Enter into a window.
     fn send_keys(&self, session: &str, window: &str, text: &str) -> Result<()>;
     /// Capture the visible pane of a window. `lines` limits to the last N lines.
+    /// The text is plain (terminal styling stripped) — suitable for one-line
+    /// summaries and piping.
     fn capture_pane(&self, session: &str, window: &str, lines: Option<usize>) -> Result<String>;
+    /// Like [`capture_pane`](Self::capture_pane) but preserves the pane's ANSI
+    /// styling (colour, bold, …) as escape sequences, for a viewer that renders
+    /// them instead of showing the raw scrollback.
+    fn capture_pane_styled(
+        &self,
+        session: &str,
+        window: &str,
+        lines: Option<usize>,
+    ) -> Result<String>;
     fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>>;
     fn kill_window(&self, session: &str, window: &str) -> Result<()>;
     /// Attach to the session; if `window` is given, select it first.
