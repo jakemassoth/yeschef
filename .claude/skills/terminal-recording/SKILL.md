@@ -73,9 +73,27 @@ accept the empty-state render).
 
 ## Attach to a PR
 
-- **Inline (small gif):** commit the gif into the repo (e.g. `docs/demo.gif`) and
-  embed it in the PR body with `![demo](docs/demo.gif)`. Renders in the PR.
-- **Upload (larger / don't want it in git):** drag-drop into the PR on GitHub, or
+**Preferred — commit, then delete (keeps the repo tree clean).** A pushed blob
+stays reachable by commit SHA even after you remove it from `HEAD`, so you can
+embed it without leaving the image in the final tree:
+
+```bash
+git add docs/demo.gif && git commit -m "tmp: demo gif" && git push
+SHA=$(git rev-parse HEAD)                       # pin the URL to this commit
+git rm docs/demo.gif && git commit -m "rm demo gif" && git push
+# Embed in the PR body with the pinned-SHA raw URL (survives the deletion):
+echo "![demo](https://github.com/<owner>/<repo>/raw/$SHA/docs/demo.gif)"
+```
+
+The gif renders in the PR but never lands in the merged tree — no repo
+pollution. (A relative `![demo](docs/demo.gif)` would break here, since the file
+is gone from `HEAD`; the absolute pinned-SHA URL is what makes it work.)
+
+**Alternatives:**
+- **Keep it in the repo:** commit the gif (e.g. `docs/demo.gif`) and embed with a
+  relative `![demo](docs/demo.gif)`. Fine for a small, lasting demo.
+- **Upload, never touch git:** drag-drop into the PR on GitHub, or
   `gh pr comment <n> --body '![demo](<uploaded-url>)'` after uploading.
 
-Commit the `.tape` alongside the output so the recording is reproducible.
+Commit the `.tape` (it's tiny and reproducible) even when you keep the gif out of
+the tree, so anyone can regenerate the recording.
