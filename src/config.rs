@@ -19,8 +19,8 @@ impl Config {
     /// This opens the store and wires up the real backends.
     pub fn load() -> Result<Self> {
         let home = resolve_home()?;
-        let db_path = home.join("nixsand.db");
-        let store = Store::open(&db_path).context("failed to open nixsand database")?;
+        let db_path = home.join("yeschef.db");
+        let store = Store::open(&db_path).context("failed to open yeschef database")?;
         Ok(Self {
             home,
             store,
@@ -35,9 +35,9 @@ impl Config {
         let home = resolve_home()?;
         // Ensure home dir exists before opening the DB
         std::fs::create_dir_all(&home)
-            .with_context(|| format!("failed to create nixsand home at {}", home.display()))?;
-        let db_path = home.join("nixsand.db");
-        let store = Store::open(&db_path).context("failed to open nixsand database")?;
+            .with_context(|| format!("failed to create yeschef home at {}", home.display()))?;
+        let db_path = home.join("yeschef.db");
+        let store = Store::open(&db_path).context("failed to open yeschef database")?;
         Ok((home, store))
     }
 
@@ -61,21 +61,21 @@ impl Config {
         self.worktrees_dir(project).join(branch)
     }
 
-    /// Directory holding per-task spawn prompt files. Lives under the nixsand
+    /// Directory holding per-ticket spawn prompt files. Lives under the yeschef
     /// home (outside any project worktree) so prompts can't be committed.
     pub fn prompts_dir(&self) -> PathBuf {
         self.home.join("prompts")
     }
 }
 
-/// Resolve the nixsand home directory.
-/// Uses `NIXSAND_HOME` env var if set, otherwise ~/.nixsand.
+/// Resolve the yeschef home directory.
+/// Uses `YESCHEF_HOME` env var if set, otherwise ~/.yeschef.
 pub fn resolve_home() -> Result<PathBuf> {
-    if let Ok(env_home) = std::env::var("NIXSAND_HOME") {
+    if let Ok(env_home) = std::env::var("YESCHEF_HOME") {
         return Ok(PathBuf::from(env_home));
     }
     let home = dirs::home_dir().context("could not determine home directory")?;
-    Ok(home.join(".nixsand"))
+    Ok(home.join(".yeschef"))
 }
 
 /// Validate that all required host binaries are available.

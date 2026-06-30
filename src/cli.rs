@@ -2,7 +2,7 @@ use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "nixsand",
+    name = "yeschef",
     about = "Orchestrate coding agents across git worktrees via zmx"
 )]
 pub struct Cli {
@@ -16,7 +16,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Initialize the nixsand home directory and validate dependencies
+    /// Initialize the yeschef home directory and validate dependencies
     Init,
 
     /// Manage projects (add / list)
@@ -67,17 +67,17 @@ pub enum Commands {
         lines: Option<usize>,
     },
 
-    /// List all tasks and whether their agents are still running
+    /// List all tickets and whether their agents are still running
     Status,
 
-    /// Open an interactive TUI to watch the crew's live output
+    /// Open an interactive TUI to watch the brigade's live output
     Tui,
 
-    /// Attach to a nixsand zmx session to watch the crew
+    /// Attach to a yeschef zmx session to watch the brigade
     Attach {
-        /// Optional project to select a specific task window
+        /// Optional project to select a specific ticket window
         project: Option<String>,
-        /// Optional branch to select a specific task window
+        /// Optional branch to select a specific ticket window
         branch: Option<String>,
     },
 

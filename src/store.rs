@@ -5,9 +5,9 @@ pub struct Store {
     conn: Connection,
 }
 
-/// A registered task: a worktree + its tmux window + the agent launched in it.
+/// A registered ticket: a worktree + its tmux window + the agent launched in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskRow {
+pub struct TicketRow {
     pub project: String,
     pub branch: String,
     pub sanitized: String,
@@ -28,8 +28,7 @@ impl Store {
     /// Open an in-memory store (for tests).
     #[allow(dead_code)]
     pub fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()
-            .context("failed to open in-memory database")?;
+        let conn = Connection::open_in_memory().context("failed to open in-memory database")?;
         let store = Self { conn };
         store.init()?;
         Ok(store)
@@ -41,7 +40,7 @@ impl Store {
             .execute_batch("PRAGMA journal_mode=WAL;")
             .context("failed to set WAL mode")?;
 
-        // `branches` is the task registry: one row per worktree, recording the
+        // `branches` is the ticket registry: one row per worktree, recording the
         // tmux window and the agent command launched in it.
         self.conn
             .execute_batch(
@@ -131,15 +130,15 @@ impl Store {
     pub fn remove_project(&self, name: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM branches WHERE project = ?1", params![name])
-            .with_context(|| format!("failed to remove tasks for project '{name}'"))?;
+            .with_context(|| format!("failed to remove tickets for project '{name}'"))?;
         self.conn
             .execute("DELETE FROM projects WHERE name = ?1", params![name])
             .with_context(|| format!("failed to remove project '{name}'"))?;
         Ok(())
     }
 
-    /// Register (or update) a task: a worktree + its tmux window + agent.
-    pub fn register_task(
+    /// Register (or update) a ticket: a worktree + its tmux window + agent.
+    pub fn register_ticket(
         &self,
         project: &str,
         branch: &str,
@@ -153,61 +152,61 @@ impl Store {
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![project, branch, sanitized, window, agent],
             )
-            .with_context(|| format!("failed to register task '{project}/{branch}'"))?;
+            .with_context(|| format!("failed to register ticket '{project}/{branch}'"))?;
         Ok(())
     }
 
-    /// Look up a single task by project + branch.
-    pub fn lookup_task(&self, project: &str, branch: &str) -> Result<Option<TaskRow>> {
+    /// Look up a single ticket by project + branch.
+    pub fn lookup_ticket(&self, project: &str, branch: &str) -> Result<Option<TicketRow>> {
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT project, branch, sanitized, window, agent
                  FROM branches WHERE project = ?1 AND branch = ?2",
             )
-            .context("failed to prepare task lookup")?;
+            .context("failed to prepare ticket lookup")?;
         let mut rows = stmt
-            .query_map(params![project, branch], row_to_task)
-            .context("failed to query task")?;
+            .query_map(params![project, branch], row_to_ticket)
+            .context("failed to query ticket")?;
         match rows.next() {
-            Some(row) => Ok(Some(row.context("failed to read task row")?)),
+            Some(row) => Ok(Some(row.context("failed to read ticket row")?)),
             None => Ok(None),
         }
     }
 
-    /// List all registered tasks, ordered by project then branch.
-    pub fn list_tasks(&self) -> Result<Vec<TaskRow>> {
+    /// List all registered tickets, ordered by project then branch.
+    pub fn list_tickets(&self) -> Result<Vec<TicketRow>> {
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT project, branch, sanitized, window, agent
                  FROM branches ORDER BY project, branch",
             )
-            .context("failed to prepare task list")?;
+            .context("failed to prepare ticket list")?;
         let rows = stmt
-            .query_map([], row_to_task)
-            .context("failed to query tasks")?;
+            .query_map([], row_to_ticket)
+            .context("failed to query tickets")?;
         let mut result = Vec::new();
         for row in rows {
-            result.push(row.context("failed to read task row")?);
+            result.push(row.context("failed to read ticket row")?);
         }
         Ok(result)
     }
 
-    /// Remove a task registration.
-    pub fn remove_task(&self, project: &str, branch: &str) -> Result<()> {
+    /// Remove a ticket registration.
+    pub fn remove_ticket(&self, project: &str, branch: &str) -> Result<()> {
         self.conn
             .execute(
                 "DELETE FROM branches WHERE project = ?1 AND branch = ?2",
                 params![project, branch],
             )
-            .with_context(|| format!("failed to remove task '{project}/{branch}'"))?;
+            .with_context(|| format!("failed to remove ticket '{project}/{branch}'"))?;
         Ok(())
     }
 }
 
-fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRow> {
-    Ok(TaskRow {
+fn row_to_ticket(row: &rusqlite::Row) -> rusqlite::Result<TicketRow> {
+    Ok(TicketRow {
         project: row.get(0)?,
         branch: row.get(1)?,
         sanitized: row.get(2)?,
@@ -244,11 +243,11 @@ mod tests {
     }
 
     #[test]
-    fn register_and_lookup_task() {
+    fn register_and_lookup_ticket() {
         let s = store();
         s.add_project("myproject", "https://example.com/foo.git")
             .unwrap();
-        s.register_task(
+        s.register_ticket(
             "myproject",
             "feature/foo",
             "feature-foo",
@@ -256,30 +255,33 @@ mod tests {
             "claude",
         )
         .unwrap();
-        let task = s.lookup_task("myproject", "feature/foo").unwrap().unwrap();
-        assert_eq!(task.sanitized, "feature-foo");
-        assert_eq!(task.window, "myproject-feature-foo");
-        assert_eq!(task.agent, "claude");
+        let ticket = s
+            .lookup_ticket("myproject", "feature/foo")
+            .unwrap()
+            .unwrap();
+        assert_eq!(ticket.sanitized, "feature-foo");
+        assert_eq!(ticket.window, "myproject-feature-foo");
+        assert_eq!(ticket.agent, "claude");
     }
 
     #[test]
-    fn lookup_nonexistent_task_returns_none() {
+    fn lookup_nonexistent_ticket_returns_none() {
         let s = store();
         s.add_project("myproject", "https://example.com/foo.git")
             .unwrap();
-        assert!(s.lookup_task("myproject", "nope").unwrap().is_none());
+        assert!(s.lookup_ticket("myproject", "nope").unwrap().is_none());
     }
 
     #[test]
-    fn list_and_remove_tasks() {
+    fn list_and_remove_tickets() {
         let s = store();
         s.add_project("p", "https://example.com/p.git").unwrap();
-        s.register_task("p", "a", "a", "p-a", "claude").unwrap();
-        s.register_task("p", "b", "b", "p-b", "codex").unwrap();
-        assert_eq!(s.list_tasks().unwrap().len(), 2);
-        s.remove_task("p", "a").unwrap();
-        let tasks = s.list_tasks().unwrap();
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].branch, "b");
+        s.register_ticket("p", "a", "a", "p-a", "claude").unwrap();
+        s.register_ticket("p", "b", "b", "p-b", "codex").unwrap();
+        assert_eq!(s.list_tickets().unwrap().len(), 2);
+        s.remove_ticket("p", "a").unwrap();
+        let tickets = s.list_tickets().unwrap();
+        assert_eq!(tickets.len(), 1);
+        assert_eq!(tickets[0].branch, "b");
     }
 }

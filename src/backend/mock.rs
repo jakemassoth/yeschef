@@ -127,7 +127,11 @@ impl MockZmxBackend {
 impl ZmxBackend for MockZmxBackend {
     fn session_exists(&self, session: &str) -> Result<bool> {
         self.record(format!("session_exists:{session}"));
-        Ok(self.existing_sessions.lock().unwrap().contains(&session.to_string()))
+        Ok(self
+            .existing_sessions
+            .lock()
+            .unwrap()
+            .contains(&session.to_string()))
     }
 
     fn ensure_session(&self, session: &str) -> Result<()> {
@@ -214,10 +218,7 @@ impl ZmxBackend for MockZmxBackend {
     }
 
     fn attach(&self, session: &str, window: Option<&str>) -> Result<()> {
-        self.record(format!(
-            "attach:{session}:{}",
-            window.unwrap_or("-")
-        ));
+        self.record(format!("attach:{session}:{}", window.unwrap_or("-")));
         Ok(())
     }
 }

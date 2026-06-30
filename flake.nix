@@ -1,5 +1,5 @@
 {
-  description = "nixsand";
+  description = "yeschef";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -63,16 +63,16 @@
         # orchestrator against real git worktrees and a real zmx session, so it
         # needs `git` and `zmx` on PATH (no containers, no macOS requirement).
         # `zmx` is supplied by the zmx-flake package and prepended to PATH below.
-        # nix run . -- <args>  — run THIS checkout's nixsand. The orchestrator
+        # nix run . -- <args>  — run THIS checkout's yeschef. The orchestrator
         # uses this so each branch runs its own build.
         apps.default = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/nixsand";
+          program = "${self.packages.${system}.default}/bin/yeschef";
         };
 
         apps.e2e = {
           type = "app";
-          program = toString (pkgs.writeShellScript "nixsand-e2e" ''
+          program = toString (pkgs.writeShellScript "yeschef-e2e" ''
             set -euo pipefail
             export PATH="${zmx}/bin:$PATH"
             for bin in git zmx; do

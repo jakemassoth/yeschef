@@ -1,11 +1,11 @@
-//! End-to-end tests for nixsand.
+//! End-to-end tests for yeschef.
 //!
 //! All tests are `#[ignore]` by default. Run with:
 //!   cargo test --test e2e -- --ignored --test-threads=1
 //!
 //! Requirements: `git` and `zmx` in PATH. No containers, no Nix, no macOS
-//! requirement — the orchestrator drives real git worktrees and a real zmx
-//! session. `--test-threads=1` keeps the shared `nixsand` zmx sessions sane
+//! requirement — the head chef drives real git worktrees and a real zmx
+//! session. `--test-threads=1` keeps the shared `yeschef` zmx sessions sane
 //! across tests (each test uses a unique project name, so windows don't clash).
 
 use std::path::Path;
@@ -18,7 +18,7 @@ use tempfile::TempDir;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// A sandboxed `NIXSAND_HOME` backed by a temp directory.
+/// A sandboxed `YESCHEF_HOME` backed by a temp directory.
 struct TestEnv {
     _tmp: TempDir,
     home: std::path::PathBuf,
@@ -27,7 +27,7 @@ struct TestEnv {
 impl TestEnv {
     fn new() -> Self {
         let tmp = TempDir::new().expect("create temp dir");
-        let home = tmp.path().join("nixsand-home");
+        let home = tmp.path().join("yeschef-home");
         TestEnv { _tmp: tmp, home }
     }
 
@@ -36,8 +36,8 @@ impl TestEnv {
     }
 
     fn cmd(&self) -> assert_cmd::Command {
-        let mut cmd = assert_cmd::Command::cargo_bin("nixsand").unwrap();
-        cmd.env("NIXSAND_HOME", &self.home);
+        let mut cmd = assert_cmd::Command::cargo_bin("yeschef").unwrap();
+        cmd.env("YESCHEF_HOME", &self.home);
         cmd
     }
 
@@ -59,7 +59,7 @@ impl SampleRepo {
         std::fs::write(path.join("README.md"), "# sample\n").unwrap();
 
         git(path, &["init", "-b", "main"]);
-        git(path, &["config", "user.email", "test@nixsand.test"]);
+        git(path, &["config", "user.email", "test@yeschef.test"]);
         git(path, &["config", "user.name", "Test"]);
         git(path, &["add", "."]);
         git(path, &["commit", "-m", "initial"]);
@@ -85,7 +85,7 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} exited non-zero");
 }
 
-/// Unique project name: lowercase alphanumeric, safe for nixsand validation.
+/// Unique project name: lowercase alphanumeric, safe for yeschef validation.
 fn unique_name() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -96,13 +96,13 @@ fn unique_name() -> String {
     format!("t{pid:08x}{:04x}", nanos & 0xffff)
 }
 
-/// The flat zmx session id the backend uses for a task window:
-/// `<nixsand_session>-<window>`.
+/// The flat zmx session id the backend uses for a ticket window:
+/// `<yeschef_session>-<window>`.
 fn zid(window: &str) -> String {
-    format!("nixsand-{window}")
+    format!("yeschef-{window}")
 }
 
-/// Kill a task's zmx session on drop (best-effort teardown).
+/// Kill a ticket's zmx session on drop (best-effort teardown).
 struct WindowCleanup(Vec<String>);
 
 impl Drop for WindowCleanup {
@@ -152,7 +152,7 @@ fn init_creates_expected_layout() {
         .stdout(predicate::str::contains("initialized"));
 
     assert!(env.home_path().join("projects").is_dir(), "projects/ dir");
-    assert!(env.home_path().join("nixsand.db").is_file(), "nixsand.db");
+    assert!(env.home_path().join("yeschef.db").is_file(), "yeschef.db");
     assert!(env.home_path().join("AGENTS.md").is_file(), "AGENTS.md");
 }
 
@@ -199,7 +199,11 @@ fn project_add_registers_bare_clone() {
         .stdout(predicate::str::contains("added"));
 
     let bare = env.home_path().join("projects").join(&name).join(".bare");
-    assert!(bare.is_dir(), "bare repo should exist at {}", bare.display());
+    assert!(
+        bare.is_dir(),
+        "bare repo should exist at {}",
+        bare.display()
+    );
 
     env.cmd()
         .args(["project", "list"])
@@ -259,7 +263,7 @@ fn spawn_unknown_project_gives_clear_error() {
 
 #[test]
 #[ignore = "requires git + zmx"]
-fn send_unknown_task_gives_clear_error() {
+fn send_unknown_ticket_gives_clear_error() {
     let env = TestEnv::new();
     env.init();
     let repo = SampleRepo::new();
@@ -272,7 +276,7 @@ fn send_unknown_task_gives_clear_error() {
         .args(["send", &name, "no-such-branch", "hi"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no task"));
+        .stderr(predicate::str::contains("no ticket"));
 }
 
 // ---------------------------------------------------------------------------
@@ -322,18 +326,35 @@ fn spawn_creates_worktree_and_live_window() {
         .join(&name)
         .join("worktrees")
         .join("demo");
-    assert!(worktree.is_dir(), "worktree should exist at {}", worktree.display());
+    assert!(
+        worktree.is_dir(),
+        "worktree should exist at {}",
+        worktree.display()
+    );
 
-    // The prompt was written to a file under the nixsand home (outside the
+    // The prompt was written to a file under the yeschef home (outside the
     // worktree, so it can't be committed) and holds the full prompt verbatim.
-    let prompt_file = env.home_path().join("prompts").join(format!("{name}-demo.md"));
-    assert!(prompt_file.is_file(), "prompt file should exist at {}", prompt_file.display());
-    assert!(!prompt_file.starts_with(&worktree), "prompt file must live outside the worktree");
+    let prompt_file = env
+        .home_path()
+        .join("prompts")
+        .join(format!("{name}-demo.md"));
+    assert!(
+        prompt_file.is_file(),
+        "prompt file should exist at {}",
+        prompt_file.display()
+    );
+    assert!(
+        !prompt_file.starts_with(&worktree),
+        "prompt file must live outside the worktree"
+    );
     let written = std::fs::read_to_string(&prompt_file).unwrap();
     assert_eq!(written, prompt_body);
 
     // zmx session is live.
-    assert!(window_exists(&window), "zmx session for '{window}' should exist");
+    assert!(
+        window_exists(&window),
+        "zmx session for '{window}' should exist"
+    );
 
     // Give the shell a moment to echo, then peek should show the marker and the
     // file-indirection instruction the agent was launched with.
@@ -344,11 +365,11 @@ fn spawn_creates_worktree_and_live_window() {
         "pane should show the agent's output; got:\n{pane}"
     );
     assert!(
-        pane.contains("Read the task brief at"),
+        pane.contains("Read the ticket brief at"),
         "pane should show the read-this-file instruction; got:\n{pane}"
     );
 
-    // status lists the task as running.
+    // status lists the ticket as running.
     env.cmd()
         .args(["status"])
         .assert()
@@ -433,9 +454,12 @@ fn kill_removes_window_and_deregisters() {
         .join(&name)
         .join("worktrees")
         .join("demo");
-    assert!(!worktree.exists(), "worktree should be removed with --rm-worktree");
+    assert!(
+        !worktree.exists(),
+        "worktree should be removed with --rm-worktree"
+    );
 
-    // Task no longer listed.
+    // Ticket no longer listed.
     env.cmd()
         .args(["status"])
         .assert()

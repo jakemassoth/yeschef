@@ -1,8 +1,8 @@
-use std::path::Path;
 use anyhow::Result;
+use std::path::Path;
 
-pub mod real;
 pub mod mock;
+pub mod real;
 
 /// Trait abstracting git operations.
 pub trait GitBackend: Send + Sync {
@@ -25,7 +25,7 @@ pub trait GitBackend: Send + Sync {
     fn fetch_prune(&self, bare_repo: &Path) -> Result<()>;
 }
 
-/// Liveness/identity info for a single task window.
+/// Liveness/identity info for a single ticket window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowInfo {
     pub name: String,
@@ -35,9 +35,9 @@ pub struct WindowInfo {
 
 /// Trait abstracting `zmx` terminal session operations.
 ///
-/// The orchestrator models tasks as windows under a single `nixsand` session
-/// (see `names::nixsand_session`). zmx has no windows — the real backend maps
-/// each `<session>:<window>` onto a standalone zmx session. The orchestrator
+/// The head chef models tickets as windows under a single `yeschef` session
+/// (see `names::yeschef_session`). zmx has no windows — the real backend maps
+/// each `<session>:<window>` onto a standalone zmx session. The head chef
 /// drives windows via `send_keys`/`capture_pane` without being attached; the
 /// human attaches separately to watch.
 pub trait ZmxBackend: Send + Sync {

@@ -57,7 +57,7 @@ pub fn run_add(config: &Config, git_url: &str, name: Option<&str>) -> Result<()>
         .with_context(|| format!("failed to register project '{project_name}'"))?;
 
     println!("project '{project_name}' added ({git_url})");
-    println!("run 'nixsand spawn {project_name} <branch>' to start an agent");
+    println!("run 'yeschef spawn {project_name} <branch>' to start an agent");
     Ok(())
 }
 
@@ -68,7 +68,7 @@ pub fn run_add(config: &Config, git_url: &str, name: Option<&str>) -> Result<()>
 pub fn run_list(config: &Config) -> Result<()> {
     let projects = config.store.list_projects()?;
     if projects.is_empty() {
-        println!("no projects registered; run 'nixsand project add <git-url>' to add one");
+        println!("no projects registered; run 'yeschef project add <git-url>' to add one");
     } else {
         for (name, url) in &projects {
             println!("{name}\t{url}");
@@ -87,13 +87,13 @@ pub fn run_list(config: &Config) -> Result<()> {
 pub fn run_refresh(config: &Config, project: Option<&str>) -> Result<()> {
     if let Some(name) = project {
         if !config.store.project_exists(name)? {
-            bail!("project '{name}' not found; run 'nixsand project add <git-url>' first");
+            bail!("project '{name}' not found; run 'yeschef project add <git-url>' first");
         }
         refresh_one(config, name)?;
     } else {
         let projects = config.store.list_projects()?;
         if projects.is_empty() {
-            println!("no projects registered; run 'nixsand project add <git-url>' to add one");
+            println!("no projects registered; run 'yeschef project add <git-url>' to add one");
             return Ok(());
         }
         for (name, _) in &projects {
@@ -139,7 +139,11 @@ mod tests {
             git: Box::new(git.clone()),
             zmx: Box::new(MockZmxBackend::new()),
         };
-        Harness { config, git, _tmp: tmp }
+        Harness {
+            config,
+            git,
+            _tmp: tmp,
+        }
     }
 
     #[test]
@@ -180,7 +184,10 @@ mod tests {
             .unwrap();
         run_refresh(&h.config, None).unwrap();
         let calls = h.git.recorded_calls();
-        let fetches = calls.iter().filter(|c| c.starts_with("fetch_prune:")).count();
+        let fetches = calls
+            .iter()
+            .filter(|c| c.starts_with("fetch_prune:"))
+            .count();
         assert_eq!(fetches, 2, "calls: {calls:?}");
     }
 }

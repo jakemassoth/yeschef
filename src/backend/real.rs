@@ -79,9 +79,7 @@ impl GitBackend for RealGitBackend {
             cmd.args(["-b", branch]).arg(worktree_path).arg(base);
         }
 
-        let status = cmd
-            .status()
-            .context("failed to run 'git worktree add'")?;
+        let status = cmd.status().context("failed to run 'git worktree add'")?;
         if !status.success() {
             bail!("git worktree add failed for branch '{branch}' from '{base}'");
         }
@@ -162,16 +160,16 @@ impl GitBackend for RealGitBackend {
 // ZmxBackend — wraps `zmx` (session attach/detach for the terminal)
 // ---------------------------------------------------------------------------
 //
-// zmx has no window concept — every session is a single PTY. The orchestrator
-// trait is window-oriented (one `nixsand` session holding many task windows),
+// zmx has no window concept — every session is a single PTY. The head chef
+// trait is window-oriented (one `yeschef` session holding many ticket windows),
 // so we map each `<session>:<window>` pair onto a standalone zmx session named
 // `<session>-<window>`. `session_exists`/`list_windows` then derive the
-// crew's state from the set of `<session>-…` zmx sessions.
+// brigade's state from the set of `<session>-…` zmx sessions.
 
 pub struct RealZmxBackend;
 
-/// Build the flat zmx session id for a task window. zmx has no windows, so each
-/// window becomes its own session, namespaced under the crew session name.
+/// Build the flat zmx session id for a ticket window. zmx has no windows, so each
+/// window becomes its own session, namespaced under the brigade session name.
 fn zid(session: &str, window: &str) -> String {
     format!("{session}-{window}")
 }
@@ -194,14 +192,14 @@ fn zmx_sessions() -> Result<Vec<String>> {
 
 impl ZmxBackend for RealZmxBackend {
     fn session_exists(&self, session: &str) -> Result<bool> {
-        // The crew "session" exists if any task session is registered under it.
+        // The brigade "session" exists if any ticket session is registered under it.
         let prefix = format!("{session}-");
         Ok(zmx_sessions()?.iter().any(|s| s.starts_with(&prefix)))
     }
 
     fn ensure_session(&self, _session: &str) -> Result<()> {
         // No-op: zmx creates sessions lazily on `zmx run`, and there is no
-        // parent session to hold windows — each task window is its own session.
+        // parent session to hold windows — each ticket window is its own session.
         Ok(())
     }
 
@@ -210,7 +208,10 @@ impl ZmxBackend for RealZmxBackend {
         // the command. zmx has no working-directory flag, so we `cd` first and
         // run everything through a login shell (matching the tmux behaviour).
         let id = zid(session, window);
-        let full = format!("cd {} && {command}", shell_single_quote(&cwd.to_string_lossy()));
+        let full = format!(
+            "cd {} && {command}",
+            shell_single_quote(&cwd.to_string_lossy())
+        );
         let status = Command::new("zmx")
             .args(["run", &id, "-d", "sh", "-lc", &full])
             .status()
@@ -275,9 +276,9 @@ impl ZmxBackend for RealZmxBackend {
     }
 
     fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>> {
-        // Recover task windows from the set of `<session>-…` zmx sessions. zmx
-        // exposes no per-session active/dead state (a finished task's session
-        // simply disappears), so both flags are always false; a vanished task
+        // Recover ticket windows from the set of `<session>-…` zmx sessions. zmx
+        // exposes no per-session active/dead state (a finished ticket's session
+        // simply disappears), so both flags are always false; a vanished ticket
         // surfaces as "gone" rather than "dead" in `status`.
         let prefix = format!("{session}-");
         let windows = zmx_sessions()?
@@ -311,9 +312,9 @@ impl ZmxBackend for RealZmxBackend {
     }
 
     fn attach(&self, session: &str, window: Option<&str>) -> Result<()> {
-        // zmx attaches to a single session (one PTY). With a task selected,
-        // attach to that task's session directly; otherwise fall back to the
-        // first live task session in the crew.
+        // zmx attaches to a single session (one PTY). With a ticket selected,
+        // attach to that ticket's session directly; otherwise fall back to the
+        // first live ticket session in the brigade.
         let id = if let Some(w) = window {
             zid(session, w)
         } else {
@@ -321,7 +322,7 @@ impl ZmxBackend for RealZmxBackend {
             zmx_sessions()?
                 .into_iter()
                 .find(|s| s.starts_with(&prefix))
-                .ok_or_else(|| anyhow::anyhow!("no live nixsand sessions to attach to"))?
+                .ok_or_else(|| anyhow::anyhow!("no live yeschef sessions to attach to"))?
         };
         let status = Command::new("zmx")
             .args(["attach", &id])
@@ -352,7 +353,7 @@ pub fn check_binary(name: &str) -> Result<()> {
         .with_context(|| format!("failed to run 'which {name}': is 'which' available?"))?;
     if !output.status.success() {
         bail!(
-            "required dependency '{name}' not found in PATH; please install it before using nixsand"
+            "required dependency '{name}' not found in PATH; please install it before using yeschef"
         );
     }
     Ok(())

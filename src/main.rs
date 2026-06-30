@@ -10,8 +10,8 @@ use anyhow::Result;
 use clap::Parser;
 
 use cli::{Cli, Commands, ProjectCommands};
-use config::Config;
 use commands::{orchestrate, project, tui};
+use config::Config;
 
 fn main() {
     let cli = Cli::parse();
@@ -19,8 +19,8 @@ fn main() {
     // Set up logging based on verbosity
     match cli.verbose {
         0 => {} // no extra logging
-        1 => eprintln!("[nixsand] verbose mode enabled"),
-        _ => eprintln!("[nixsand] trace mode enabled"),
+        1 => eprintln!("[yeschef] verbose mode enabled"),
+        _ => eprintln!("[yeschef] trace mode enabled"),
     }
 
     if let Err(e) = run(cli) {

@@ -52,7 +52,13 @@ fn sanitize_for_project(s: &str) -> String {
     // Replace any non-alphanumeric, non-hyphen char with hyphen
     let mut result: String = lower
         .chars()
-        .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     // Collapse consecutive hyphens
     while result.contains("--") {
@@ -70,7 +76,13 @@ pub fn sanitize_branch(branch: &str) -> String {
     let lower = branch.to_lowercase();
     let mut result: String = lower
         .chars()
-        .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     // Collapse consecutive hyphens
     while result.contains("--") {
@@ -81,15 +93,15 @@ pub fn sanitize_branch(branch: &str) -> String {
     result
 }
 
-/// The crew session name that namespaces every task window.
+/// The brigade session name that namespaces every ticket window.
 ///
-/// The real zmx backend maps each task window onto a standalone zmx session
-/// named `<nixsand_session>-<window>`.
-pub fn nixsand_session() -> &'static str {
-    "nixsand"
+/// The real zmx backend maps each ticket window onto a standalone zmx session
+/// named `<yeschef_session>-<window>`.
+pub fn yeschef_session() -> &'static str {
+    "yeschef"
 }
 
-/// Derive the task window name from project + sanitized branch.
+/// Derive the ticket window name from project + sanitized branch.
 ///
 /// Avoids `.` and `:` (historically tmux target separators) so the name stays
 /// safe to embed in a zmx session id. `sanitize_branch` already strips `.`/`:`,
@@ -119,7 +131,10 @@ mod tests {
         assert!(validate_project_name("-foo").is_err(), "leading hyphen");
         assert!(validate_project_name("foo-").is_err(), "trailing hyphen");
         assert!(validate_project_name("FOO").is_err(), "uppercase");
-        assert!(validate_project_name("foo--bar").is_err(), "consecutive hyphens");
+        assert!(
+            validate_project_name("foo--bar").is_err(),
+            "consecutive hyphens"
+        );
     }
 
     #[test]

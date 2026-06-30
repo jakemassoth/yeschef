@@ -591,21 +591,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nixsand"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "clap",
- "dirs",
- "predicates",
- "ratatui",
- "rusqlite",
- "tempfile",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "normalize-line-endings"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1516,6 +1501,21 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "yeschef"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "clap",
+ "dirs",
+ "predicates",
+ "ratatui",
+ "rusqlite",
+ "tempfile",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
