@@ -1,12 +1,12 @@
 # yeschef
 
-Orchestrate multiple coding agents in parallel across git worktrees, using tmux.
+Orchestrate multiple coding agents in parallel across git worktrees, using zmx.
 
 yeschef lets **one** agent session (the head chef) dispatch and supervise a brigade of
-agents, each working on its own branch in its own git worktree inside its own tmux
-window. You talk to the head chef; it spawns line cooks, steers them, reads their
+agents, each working on its own branch in its own git worktree inside its own zmx
+session. You talk to the head chef; it spawns line cooks, steers them, reads their
 output, and reports back. It is **agent-agnostic** — a line cook is just a command launched
-in a window (`claude`, `codex`, `aider`, …), so nothing is tied to a particular vendor.
+in a zmx session (`claude`, `codex`, `aider`, …), so nothing is tied to a particular vendor.
 
 > Inspired by [firstmate](https://github.com/kunchenguid/firstmate). Where firstmate is
 > bash scripts + an `AGENTS.md`, yeschef is a single Rust CLI that *is* the toolbelt, plus
@@ -14,7 +14,7 @@ in a window (`claude`, `codex`, `aider`, …), so nothing is tied to a particula
 
 ## Requirements
 
-`git` and `tmux` on your `PATH`. That's it — no containers, no Nix, no macOS requirement.
+`git` and `zmx` on your `PATH`. That's it — no containers, no Nix, no macOS requirement.
 
 ## Workflow
 
@@ -23,7 +23,7 @@ yeschef init                                  # ~/.yeschef + AGENTS.md
 yeschef project add <git-url> [name]          # bare clone + worktrees dir
 yeschef refresh [<project>]                   # git fetch --prune (all projects if omitted)
 
-# dispatch a line cook: worktree + tmux window + agent
+# dispatch a line cook: worktree + zmx session + agent
 yeschef spawn <project> <branch> -p "Implement X and summarize what changed"
 
 yeschef status                                # who's running / dead / gone
@@ -46,9 +46,9 @@ nix build              # or: cargo build
 nix build .#clippy     # clippy -D warnings -D clippy::pedantic
 nix build .#test       # or: cargo test  (unit tests, no external deps)
 
-# e2e (real git + tmux; no containers/macOS needed)
+# e2e (real git + zmx; no containers/macOS needed)
 cargo test --test e2e -- --ignored --test-threads=1
-nix run .#e2e          # PATH-checks git + tmux first
+nix run .#e2e          # PATH-checks git + zmx first
 ```
 
 ## Status

@@ -206,7 +206,8 @@ impl ZmxBackend for RealZmxBackend {
     fn new_window(&self, session: &str, window: &str, cwd: &Path, command: &str) -> Result<()> {
         // `zmx run <name> -d <command...>` creates a detached session running
         // the command. zmx has no working-directory flag, so we `cd` first and
-        // run everything through a login shell (matching the tmux behaviour).
+        // run everything through a login shell so the agent gets a full
+        // environment.
         let id = zid(session, window);
         let full = format!(
             "cd {} && {command}",
@@ -250,8 +251,8 @@ impl ZmxBackend for RealZmxBackend {
 
     fn capture_pane(&self, session: &str, window: &str, lines: Option<usize>) -> Result<String> {
         let id = zid(session, window);
-        // `zmx history` dumps the full session scrollback; trim to the last N
-        // lines ourselves to mirror tmux's `capture-pane -S -N`.
+        // `zmx history` dumps the full session scrollback; it has no line-count
+        // flag, so trim to the last N lines ourselves.
         let output = Command::new("zmx")
             .args(["history", &id])
             .output()

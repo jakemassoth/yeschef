@@ -69,7 +69,7 @@ fn sanitize_for_project(s: &str) -> String {
     result
 }
 
-/// Sanitize a branch name for use in container/tmux names.
+/// Sanitize a branch name for use in derived window / zmx session names.
 /// Replace any char not in `[a-z0-9-]` with `-`, collapse consecutive `-`,
 /// strip leading/trailing `-`.
 pub fn sanitize_branch(branch: &str) -> String {
@@ -156,8 +156,9 @@ mod tests {
 
     #[test]
     fn window_name_is_target_safe() {
-        // sanitize_branch + window_name must never produce tmux target
-        // metacharacters (`.` pane, `:` window).
+        // sanitize_branch + window_name must never produce `.` or `:`
+        // (historically tmux target separators) so the name stays safe to
+        // embed as a zmx session id.
         let w = window_name("proj", &sanitize_branch("feature/x.y:z"));
         assert!(!w.contains('.') && !w.contains(':'), "got {w}");
     }

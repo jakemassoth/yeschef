@@ -115,7 +115,7 @@ pub fn run_spawn(
             .context("failed to unset extensions.relativeWorktrees on bare repo")?;
     }
 
-    // 2. Launch the agent in a fresh tmux window rooted at the worktree.
+    // 2. Launch the agent in a fresh zmx session rooted at the worktree.
     //
     // The prompt is never passed inline: a long prompt (a few paragraphs) blows
     // past the OS arg-length limit and the agent harness, treating the giant
@@ -137,7 +137,7 @@ pub fn run_spawn(
     config
         .zmx
         .new_window(session, &window, &worktree_path, &command)
-        .with_context(|| format!("failed to create tmux window '{session}:{window}'"))?;
+        .with_context(|| format!("failed to create zmx session '{session}-{window}'"))?;
 
     // 3. Register the ticket.
     config

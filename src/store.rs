@@ -5,7 +5,7 @@ pub struct Store {
     conn: Connection,
 }
 
-/// A registered ticket: a worktree + its tmux window + the agent launched in it.
+/// A registered ticket: a worktree + its zmx session + the agent launched in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TicketRow {
     pub project: String,
@@ -41,7 +41,7 @@ impl Store {
             .context("failed to set WAL mode")?;
 
         // `branches` is the ticket registry: one row per worktree, recording the
-        // tmux window and the agent command launched in it.
+        // window (its backing zmx session) and the agent command launched in it.
         self.conn
             .execute_batch(
                 "
@@ -137,7 +137,7 @@ impl Store {
         Ok(())
     }
 
-    /// Register (or update) a ticket: a worktree + its tmux window + agent.
+    /// Register (or update) a ticket: a worktree + its zmx session + agent.
     pub fn register_ticket(
         &self,
         project: &str,

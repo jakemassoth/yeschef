@@ -96,7 +96,7 @@ pub struct MockZmxBackend {
     pub calls: Arc<Mutex<Vec<String>>>,
     pub existing_sessions: Arc<Mutex<Vec<String>>>,
     /// In-memory windows per session, so orchestration logic can be tested
-    /// without a real tmux. Keyed by session; value is the ordered window list.
+    /// without a real zmx. Keyed by session; value is the ordered window list.
     pub windows: Arc<Mutex<HashMap<String, Vec<WindowInfo>>>>,
     /// Canned pane content keyed by "`session:window`".
     pub pane_contents: Arc<Mutex<HashMap<String, String>>>,
