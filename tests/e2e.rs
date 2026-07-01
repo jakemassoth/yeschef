@@ -422,7 +422,8 @@ fn spawn_creates_worktree_and_live_window() {
     );
 
     // The prompt was written to a file under the yeschef home (outside the
-    // worktree, so it can't be committed) and holds the full prompt verbatim.
+    // worktree, so it can't be committed) and holds the full prompt verbatim,
+    // preceded by the status-reporting protocol preamble.
     let prompt_file = env
         .home_path()
         .join("prompts")
@@ -437,7 +438,14 @@ fn spawn_creates_worktree_and_live_window() {
         "prompt file must live outside the worktree"
     );
     let written = std::fs::read_to_string(&prompt_file).unwrap();
-    assert_eq!(written, prompt_body);
+    assert!(
+        written.contains("## Reporting your status"),
+        "prompt file should carry the status protocol preamble; got:\n{written}"
+    );
+    assert!(
+        written.ends_with(&format!("---\n\n{prompt_body}")),
+        "prompt file should end with the verbatim user prompt after the rule; got:\n{written}"
+    );
 
     // zmx session is live.
     assert!(
