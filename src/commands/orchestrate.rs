@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Context, Result};
 
+use crate::cli::TaskStatus;
 use crate::config::Config;
 use crate::guard::RollbackGuard;
 use crate::names::{sanitize_branch, window_name, yeschef_session};
@@ -32,6 +33,19 @@ fn write_prompt_file(
     std::fs::write(&path, prompt)
         .with_context(|| format!("failed to write prompt file at {}", path.display()))?;
     Ok(path)
+}
+
+/// Build the status-reporting preamble every line cook is handed, with the
+/// actual project/branch substituted so the command is copy-pasteable.
+fn status_protocol_preamble(project: &str, branch: &str) -> String {
+    format!(
+        "## Reporting your status\n\
+         Report your task status to the head chef by running (from any dir):\n\
+        \x20   nix run ~/.yeschef/yeschef-src -- ticket {project} {branch} status-set <STATUS>\n\
+         Set IN_PROGRESS when you start real work, BLOCKED if you're stuck and need a\n\
+         decision, and DONE when the work is finished and the PR is open. Do this\n\
+         proactively as your state changes."
+    )
 }
 
 /// Resolve a registered ticket, returning a clear error if it doesn't exist.
@@ -123,17 +137,22 @@ pub fn run_spawn(
     // prompt to a file outside the worktree and hand the agent a short
     // instruction to read it. This stays agent-agnostic — claude/codex/aider all
     // take an initial instruction as their positional arg.
-    let command = match prompt {
-        Some(p) => {
-            let prompt_path = write_prompt_file(config, project, &sanitized, p)?;
-            let instruction = format!(
-                "Read the ticket brief at {} and carry it out start to finish.",
-                prompt_path.display()
-            );
-            format!("{agent} {}", shell_single_quote(&instruction))
-        }
-        None => agent.to_string(),
+    //
+    // Every line cook is handed the status-reporting protocol, whether or not a
+    // `-p` prompt was supplied — so we always write a brief file (preamble, plus
+    // the user prompt if any) and always launch via the read-this-file
+    // instruction.
+    let preamble = status_protocol_preamble(project, branch);
+    let brief = match prompt {
+        Some(p) => format!("{preamble}\n\n---\n\n{p}"),
+        None => preamble,
     };
+    let prompt_path = write_prompt_file(config, project, &sanitized, &brief)?;
+    let instruction = format!(
+        "Read the ticket brief at {} and carry it out start to finish.",
+        prompt_path.display()
+    );
+    let command = format!("{agent} {}", shell_single_quote(&instruction));
     config
         .zmx
         .new_window(session, &window, &worktree_path, &command)
@@ -201,7 +220,10 @@ pub fn run_status(config: &Config) -> Result<()> {
     let session = yeschef_session();
     let windows = config.zmx.list_windows(session).unwrap_or_default();
 
-    println!("{:<28} {:<10} {:<12} LAST LINE", "TICKET", "AGENT", "STATE");
+    println!(
+        "{:<28} {:<10} {:<12} {:<12} LAST LINE",
+        "TICKET", "AGENT", "STATE", "STATUS"
+    );
     for ticket in &tickets {
         let info = windows.iter().find(|w| w.name == ticket.window);
         let state = match info {
@@ -225,8 +247,31 @@ pub fn run_status(config: &Config) -> Result<()> {
             String::new()
         };
         let label = format!("{}/{}", ticket.project, ticket.branch);
-        println!("{label:<28} {:<10} {state:<12} {last_line}", ticket.agent);
+        println!(
+            "{label:<28} {:<10} {state:<12} {:<12} {last_line}",
+            ticket.agent, ticket.status
+        );
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ticket status-set
+// ---------------------------------------------------------------------------
+
+pub fn run_ticket_status_set(
+    config: &Config,
+    project: &str,
+    branch: &str,
+    status: TaskStatus,
+) -> Result<()> {
+    // Ensure the ticket exists (clear error otherwise) before writing.
+    require_ticket(config, project, branch)?;
+    config
+        .store
+        .set_ticket_status(project, branch, status.as_str())
+        .with_context(|| format!("failed to set status for '{project}/{branch}'"))?;
+    println!("status of '{project}/{branch}' set to {}", status.as_str());
     Ok(())
 }
 
@@ -411,8 +456,58 @@ mod tests {
             "prompt file must live outside the worktree: {}",
             prompt_path.display()
         );
+        // The full prompt is present in the file verbatim (now preceded by the
+        // status-protocol preamble, separated by a horizontal rule).
         let written = std::fs::read_to_string(&prompt_path).unwrap();
-        assert_eq!(written, long_prompt);
+        assert!(
+            written.contains(&long_prompt),
+            "prompt file missing the user prompt"
+        );
+        assert!(
+            written.contains("## Reporting your status"),
+            "prompt file missing the status protocol preamble"
+        );
+        assert!(
+            written.contains("\n\n---\n\n"),
+            "preamble and user prompt should be separated by a rule"
+        );
+    }
+
+    #[test]
+    fn spawn_injects_status_protocol_even_without_prompt() {
+        let h = harness(MockZmxBackend::new());
+        run_spawn(&h.config, "proj", "feature/x", None, "claude", None).unwrap();
+
+        // Even with no -p prompt, a brief file is written carrying the protocol,
+        // and the agent is launched via the read-this-file instruction.
+        let prompt_path = h.config.prompts_dir().join("proj-feature-x.md");
+        let written = std::fs::read_to_string(&prompt_path).unwrap();
+        assert!(written.contains("## Reporting your status"));
+        // The command is substituted with the real project/branch.
+        assert!(written.contains("ticket proj feature/x status-set <STATUS>"));
+
+        let calls = h.zmx.recorded_calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("new_window:yeschef:proj-feature-x:")
+                    && c.contains("claude 'Read the ticket brief at ")),
+            "calls: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn ticket_status_set_persists_and_requires_ticket() {
+        let h = harness(MockZmxBackend::new());
+        run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap();
+
+        run_ticket_status_set(&h.config, "proj", "x", TaskStatus::Blocked).unwrap();
+        let ticket = h.config.store.lookup_ticket("proj", "x").unwrap().unwrap();
+        assert_eq!(ticket.status, "BLOCKED");
+
+        // Unknown ticket errors, doesn't create a row.
+        let err = run_ticket_status_set(&h.config, "proj", "ghost", TaskStatus::Done).unwrap_err();
+        assert!(err.to_string().contains("no ticket"), "{err}");
     }
 
     #[test]

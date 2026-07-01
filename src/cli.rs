@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -21,6 +21,9 @@ pub enum Commands {
 
     /// Manage projects (add / list)
     Project(ProjectArgs),
+
+    /// Operate on a registered ticket (e.g. report its task status)
+    Ticket(TicketArgs),
 
     /// Fetch the latest remote refs into a project's bare clone
     Refresh {
@@ -121,4 +124,46 @@ pub enum ProjectCommands {
 
     /// List all registered projects
     List,
+}
+
+#[derive(Args, Debug)]
+pub struct TicketArgs {
+    /// Project name
+    pub project: String,
+    /// Branch name
+    pub branch: String,
+    #[command(subcommand)]
+    pub command: TicketCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TicketCommands {
+    /// Report this ticket's task status to the head chef
+    StatusSet {
+        /// One of `IN_PROGRESS`, `DONE`, `BLOCKED`
+        status: TaskStatus,
+    },
+}
+
+/// Self-reported task status a line cook sets on its ticket. Orthogonal to zmx
+/// window liveness — this is what the cook says about its own work.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStatus {
+    #[value(name = "IN_PROGRESS")]
+    InProgress,
+    #[value(name = "DONE")]
+    Done,
+    #[value(name = "BLOCKED")]
+    Blocked,
+}
+
+impl TaskStatus {
+    /// The canonical uppercase form persisted in the store.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskStatus::InProgress => "IN_PROGRESS",
+            TaskStatus::Done => "DONE",
+            TaskStatus::Blocked => "BLOCKED",
+        }
+    }
 }

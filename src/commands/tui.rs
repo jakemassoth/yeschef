@@ -56,6 +56,47 @@ impl CookState {
     }
 }
 
+/// A line cook's self-reported task status, orthogonal to [`CookState`]
+/// (which is window liveness). Parsed from the stored `status` string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStatus {
+    New,
+    InProgress,
+    Done,
+    Blocked,
+}
+
+impl TaskStatus {
+    /// Parse the stored status string; anything unrecognized (including the
+    /// empty/`NEW` default) reads as [`TaskStatus::New`].
+    fn from_stored(s: &str) -> Self {
+        match s {
+            "IN_PROGRESS" => TaskStatus::InProgress,
+            "DONE" => TaskStatus::Done,
+            "BLOCKED" => TaskStatus::Blocked,
+            _ => TaskStatus::New,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            TaskStatus::New => "NEW",
+            TaskStatus::InProgress => "IN_PROGRESS",
+            TaskStatus::Done => "DONE",
+            TaskStatus::Blocked => "BLOCKED",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            TaskStatus::New => Color::DarkGray,
+            TaskStatus::InProgress => Color::Yellow,
+            TaskStatus::Done => Color::Green,
+            TaskStatus::Blocked => Color::Red,
+        }
+    }
+}
+
 /// One line cook row in the sidebar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CookRow {
@@ -63,6 +104,7 @@ pub struct CookRow {
     pub branch: String,
     pub window: String,
     pub state: CookState,
+    pub status: TaskStatus,
 }
 
 /// Pure UI state: the brigade list, the selected index, and the captured pane
@@ -163,6 +205,7 @@ fn load_brigade(config: &Config) -> Vec<CookRow> {
                 branch: ticket.branch,
                 window: ticket.window,
                 state,
+                status: TaskStatus::from_stored(&ticket.status),
             }
         })
         .collect()
@@ -263,6 +306,8 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 Span::raw(c.branch.clone()),
                 Span::raw("  "),
                 Span::styled(c.state.label(), Style::default().fg(c.state.color())),
+                Span::raw(" "),
+                Span::styled(c.status.label(), Style::default().fg(c.status.color())),
             ]);
             ListItem::new(line)
         })
@@ -281,10 +326,16 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 }
 
 fn render_pane(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let title = app.selected_cook().map_or_else(
-        || " no line cooks — spawn one with 'yeschef spawn' ".to_string(),
-        |c| format!(" {}/{} [{}] ", c.project, c.branch, c.state.label()),
-    );
+    let title = match app.selected_cook() {
+        None => Line::from(" no line cooks — spawn one with 'yeschef spawn' "),
+        Some(c) => Line::from(vec![
+            Span::raw(format!(" {}/{} [", c.project, c.branch)),
+            Span::styled(c.state.label(), Style::default().fg(c.state.color())),
+            Span::raw("] "),
+            Span::styled(c.status.label(), Style::default().fg(c.status.color())),
+            Span::raw(" "),
+        ]),
+    };
     let block = Block::default().title(title).borders(Borders::ALL);
 
     // Anchor to the bottom of the scrollback: scroll past everything that
@@ -310,6 +361,7 @@ mod tests {
             branch: branch.to_string(),
             window: format!("{project}-{branch}"),
             state: CookState::Running,
+            status: TaskStatus::New,
         }
     }
 
@@ -390,6 +442,36 @@ mod tests {
         // Same-size update keeps the selection put.
         app.set_brigade((0..5).map(|i| row("proj", &format!("x{i}"))).collect());
         assert_eq!(app.selected(), 2);
+    }
+
+    #[test]
+    fn task_status_parses_and_colors() {
+        assert_eq!(
+            TaskStatus::from_stored("IN_PROGRESS"),
+            TaskStatus::InProgress
+        );
+        assert_eq!(TaskStatus::from_stored("DONE"), TaskStatus::Done);
+        assert_eq!(TaskStatus::from_stored("BLOCKED"), TaskStatus::Blocked);
+        // The default and anything unknown read as New.
+        assert_eq!(TaskStatus::from_stored("NEW"), TaskStatus::New);
+        assert_eq!(TaskStatus::from_stored(""), TaskStatus::New);
+        assert_eq!(TaskStatus::from_stored("garbage"), TaskStatus::New);
+
+        assert_eq!(TaskStatus::InProgress.color(), Color::Yellow);
+        assert_eq!(TaskStatus::Done.color(), Color::Green);
+        assert_eq!(TaskStatus::Blocked.color(), Color::Red);
+        assert_eq!(TaskStatus::New.color(), Color::DarkGray);
+    }
+
+    #[test]
+    fn brigade_row_carries_task_status() {
+        let mut app = App::new();
+        let mut r = row("proj", "feature");
+        r.status = TaskStatus::Blocked;
+        app.set_brigade(vec![r]);
+        let cook = app.selected_cook().unwrap();
+        assert_eq!(cook.status, TaskStatus::Blocked);
+        assert_eq!(cook.status.label(), "BLOCKED");
     }
 
     #[test]

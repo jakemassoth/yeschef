@@ -9,7 +9,7 @@ mod store;
 use anyhow::Result;
 use clap::Parser;
 
-use cli::{Cli, Commands, ProjectCommands};
+use cli::{Cli, Commands, ProjectCommands, TicketCommands};
 use commands::{cleanup, orchestrate, project, tui};
 use config::Config;
 
@@ -45,6 +45,18 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Refresh { project } => {
             let config = Config::load()?;
             project::run_refresh(&config, project.as_deref())?;
+            return Ok(());
+        }
+        Commands::Ticket(ticket_args) => {
+            let config = Config::load()?;
+            match ticket_args.command {
+                TicketCommands::StatusSet { status } => orchestrate::run_ticket_status_set(
+                    &config,
+                    &ticket_args.project,
+                    &ticket_args.branch,
+                    status,
+                )?,
+            }
             return Ok(());
         }
         _ => {}
@@ -90,7 +102,7 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Cleanup { project, yes } => {
             cleanup::run_cleanup(&config, project.as_deref(), yes)?;
         }
-        Commands::Init | Commands::Project(_) | Commands::Refresh { .. } => {
+        Commands::Init | Commands::Project(_) | Commands::Refresh { .. } | Commands::Ticket(_) => {
             unreachable!("handled above")
         }
     }

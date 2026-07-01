@@ -13,6 +13,9 @@ pub struct TicketRow {
     pub sanitized: String,
     pub window: String,
     pub agent: String,
+    /// Self-reported task status (`NEW`/`IN_PROGRESS`/`DONE`/`BLOCKED`),
+    /// orthogonal to zmx window liveness.
+    pub status: String,
 }
 
 impl Store {
@@ -55,6 +58,7 @@ impl Store {
                     sanitized TEXT NOT NULL,
                     window TEXT NOT NULL DEFAULT '',
                     agent TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'NEW',
                     PRIMARY KEY (project, branch)
                 );
                 ",
@@ -67,6 +71,7 @@ impl Store {
         for stmt in [
             "ALTER TABLE branches ADD COLUMN window TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE branches ADD COLUMN agent TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE branches ADD COLUMN status TEXT NOT NULL DEFAULT 'NEW'",
         ] {
             if let Err(e) = self.conn.execute(stmt, []) {
                 let msg = e.to_string();
@@ -146,13 +151,37 @@ impl Store {
         window: &str,
         agent: &str,
     ) -> Result<()> {
+        // Upsert rather than INSERT OR REPLACE: a re-spawn (the supported
+        // "resume" path) must refresh window/agent/sanitized but LEAVE the
+        // self-reported `status` intact. A brand-new ticket takes the 'NEW'
+        // column default.
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO branches (project, branch, sanitized, window, agent)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO branches (project, branch, sanitized, window, agent)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(project, branch) DO UPDATE SET
+                     sanitized = excluded.sanitized,
+                     window = excluded.window,
+                     agent = excluded.agent",
                 params![project, branch, sanitized, window, agent],
             )
             .with_context(|| format!("failed to register ticket '{project}/{branch}'"))?;
+        Ok(())
+    }
+
+    /// Set a ticket's self-reported task status. Errors if the ticket doesn't
+    /// exist (never silently creates a row).
+    pub fn set_ticket_status(&self, project: &str, branch: &str, status: &str) -> Result<()> {
+        let rows = self
+            .conn
+            .execute(
+                "UPDATE branches SET status = ?3 WHERE project = ?1 AND branch = ?2",
+                params![project, branch, status],
+            )
+            .with_context(|| format!("failed to set status for ticket '{project}/{branch}'"))?;
+        if rows == 0 {
+            return Err(anyhow!("no ticket for '{project}/{branch}'"));
+        }
         Ok(())
     }
 
@@ -161,7 +190,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT project, branch, sanitized, window, agent
+                "SELECT project, branch, sanitized, window, agent, status
                  FROM branches WHERE project = ?1 AND branch = ?2",
             )
             .context("failed to prepare ticket lookup")?;
@@ -179,7 +208,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT project, branch, sanitized, window, agent
+                "SELECT project, branch, sanitized, window, agent, status
                  FROM branches ORDER BY project, branch",
             )
             .context("failed to prepare ticket list")?;
@@ -212,6 +241,7 @@ fn row_to_ticket(row: &rusqlite::Row) -> rusqlite::Result<TicketRow> {
         sanitized: row.get(2)?,
         window: row.get(3)?,
         agent: row.get(4)?,
+        status: row.get(5)?,
     })
 }
 
@@ -262,6 +292,42 @@ mod tests {
         assert_eq!(ticket.sanitized, "feature-foo");
         assert_eq!(ticket.window, "myproject-feature-foo");
         assert_eq!(ticket.agent, "claude");
+        // A brand-new ticket starts at the 'NEW' default.
+        assert_eq!(ticket.status, "NEW");
+    }
+
+    #[test]
+    fn set_ticket_status_updates_status() {
+        let s = store();
+        s.add_project("p", "https://example.com/p.git").unwrap();
+        s.register_ticket("p", "a", "a", "p-a", "claude").unwrap();
+        s.set_ticket_status("p", "a", "BLOCKED").unwrap();
+        let ticket = s.lookup_ticket("p", "a").unwrap().unwrap();
+        assert_eq!(ticket.status, "BLOCKED");
+    }
+
+    #[test]
+    fn set_ticket_status_errors_for_unknown_ticket() {
+        let s = store();
+        s.add_project("p", "https://example.com/p.git").unwrap();
+        let err = s.set_ticket_status("p", "ghost", "DONE").unwrap_err();
+        assert!(err.to_string().contains("no ticket"), "{err}");
+        // Must not have silently created a row.
+        assert!(s.lookup_ticket("p", "ghost").unwrap().is_none());
+    }
+
+    #[test]
+    fn reregister_preserves_status() {
+        let s = store();
+        s.add_project("p", "https://example.com/p.git").unwrap();
+        s.register_ticket("p", "a", "a", "p-a", "claude").unwrap();
+        s.set_ticket_status("p", "a", "IN_PROGRESS").unwrap();
+
+        // Re-spawn: window/agent change, but the reported status survives.
+        s.register_ticket("p", "a", "a", "p-a", "codex").unwrap();
+        let ticket = s.lookup_ticket("p", "a").unwrap().unwrap();
+        assert_eq!(ticket.agent, "codex");
+        assert_eq!(ticket.status, "IN_PROGRESS");
     }
 
     #[test]
