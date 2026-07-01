@@ -13,7 +13,7 @@ steers them. It is agent-agnostic: a line cook is just a command string launched
 zmx session. Requires only `git` and `zmx` (no containers, no Nix, no macOS requirement).
 
 The orchestration "brain" is `AGENTS.md` (shipped in the repo root and written to
-`~/.yeschef/` by `init`); the head chef agent reads it and drives the loop via the CLI.
+`~/yeschef/` by `init`); the head chef agent reads it and drives the loop via the CLI.
 
 Workflow:
 
@@ -111,7 +111,7 @@ unit-testable with no zmx). `Config` in `src/config.rs` holds both backends as
 `Box<dyn Trait>` plus the `Store`, and is constructed in `main.rs` before dispatch.
 
 Command logic lives in `src/commands/`:
-- `init.rs` — creates `~/.yeschef/` layout, writes `AGENTS.md`, validates `git` + `zmx`.
+- `init.rs` — creates `~/yeschef/` layout, writes `AGENTS.md`, validates `git` + `zmx`.
 - `project.rs` — `add` (bare clone + worktrees dir) and `list`.
 - `orchestrate.rs` — `spawn`, `send`, `peek`, `status`, `kill`, `attach`. `spawn` is the
   meaty one: creates the worktree (guarded by `RollbackGuard`), ensures the brigade session,
@@ -119,13 +119,13 @@ Command logic lives in `src/commands/`:
   The `-p` prompt is **never inlined** on the launch command line — a long prompt would
   overflow the OS arg-length limit and the agent harness, treating the giant positional
   arg as a path, dies with `ENAMETOOLONG`. Instead `spawn` writes the prompt to
-  `~/.yeschef/prompts/<project>-<sanitized-branch>.md` (a stable path outside the worktree,
+  `~/yeschef/prompts/<project>-<sanitized-branch>.md` (a stable path outside the worktree,
   so it can't be committed; overwritten on re-spawn) and launches the agent with a short
   `Read the ticket brief at <abs-path> and carry it out start to finish.` instruction. This
   is always-file (no size threshold — simpler, and correct for every prompt length) and
   agent-agnostic, since every agent takes an initial instruction as its positional arg.
 
-State is persisted in SQLite (`~/.yeschef/yeschef.db`, via `src/store.rs`). Two tables:
+State is persisted in SQLite (`~/yeschef/yeschef.db`, via `src/store.rs`). Two tables:
 `projects` (name, git_url) and `branches` — the ticket registry — (project, branch,
 sanitized, window, agent).
 
@@ -152,11 +152,11 @@ separators) so the derived name stays a clean zmx session id.
 
 ## Home directory
 
-Defaults to `~/.yeschef`; overridden with `YESCHEF_HOME` (used by e2e tests for isolation).
+Defaults to `~/yeschef`; overridden with `YESCHEF_HOME` (used by e2e tests for isolation).
 Layout:
 
 ```
-~/.yeschef/
+~/yeschef/
   yeschef.db
   AGENTS.md         # kitchen manual, refreshed by `init`
   projects/

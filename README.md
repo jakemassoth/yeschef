@@ -20,7 +20,7 @@ source (see [Running yeschef](#running-yeschef)). No containers, no macOS requir
 ## Workflow
 
 ```bash
-yeschef init                                  # ~/.yeschef + AGENTS.md
+yeschef init                                  # ~/yeschef + AGENTS.md
 yeschef project add <git-url> [name]          # bare clone + worktrees dir
 yeschef refresh [<project>]                   # git fetch --prune (all projects if omitted)
 
@@ -42,16 +42,16 @@ the agent's first argument.
 
 yeschef is never installed or on your `PATH`. The bare `yeschef <args>` written above (and
 throughout `AGENTS.md`) is **shorthand** — you always run it from the canonical source
-checkout at **`~/.yeschef/yeschef-src`**, which works from any directory and always runs
+checkout at **`~/yeschef/yeschef-src`**, which works from any directory and always runs
 the latest source there:
 
 ```bash
-nix run ~/.yeschef/yeschef-src -- <args>                          # reproducible default
-cargo run --manifest-path ~/.yeschef/yeschef-src/Cargo.toml -- <args>   # faster for tight loops
+nix run ~/yeschef/yeschef-src -- <args>                          # reproducible default
+cargo run --manifest-path ~/yeschef/yeschef-src/Cargo.toml -- <args>   # faster for tight loops
 ```
 
 `AGENTS.md` is the head chef's manual — the dispatch → supervise → land → teardown loop.
-`yeschef init` writes a copy to `~/.yeschef/`, and it also ships in the source checkout.
+`yeschef init` writes a copy to `~/yeschef/`, and it also ships in the source checkout.
 
 ## Development
 

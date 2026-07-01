@@ -4,7 +4,7 @@ use crate::config::{check_host_deps, resolve_home};
 use crate::store::Store;
 
 /// The kitchen manual, shipped into the yeschef home so the head chef
-/// agent (launched from `~/.yeschef`) loads it automatically.
+/// agent (launched from `~/yeschef`) loads it automatically.
 const AGENTS_MD: &str = include_str!("../../AGENTS.md");
 
 /// Run `yeschef init`.

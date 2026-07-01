@@ -69,13 +69,13 @@ impl Config {
 }
 
 /// Resolve the yeschef home directory.
-/// Uses `YESCHEF_HOME` env var if set, otherwise ~/.yeschef.
+/// Uses `YESCHEF_HOME` env var if set, otherwise ~/yeschef.
 pub fn resolve_home() -> Result<PathBuf> {
     if let Ok(env_home) = std::env::var("YESCHEF_HOME") {
         return Ok(PathBuf::from(env_home));
     }
     let home = dirs::home_dir().context("could not determine home directory")?;
-    Ok(home.join(".yeschef"))
+    Ok(home.join("yeschef"))
 }
 
 /// Validate that all required host binaries are available.

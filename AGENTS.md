@@ -24,19 +24,19 @@ moving.
 ## Invoking yeschef
 
 yeschef is never installed or on your `PATH`. You always run it from the canonical source
-checkout at **`~/.yeschef/yeschef-src`**, which works **from any directory** and always
+checkout at **`~/yeschef/yeschef-src`**, which works **from any directory** and always
 runs the latest source there — no `cd` to a repo root needed:
 
 ```
-nix run ~/.yeschef/yeschef-src -- <args>    # reproducible default
-# e.g. nix run ~/.yeschef/yeschef-src -- spawn <project> <branch> -p "..."
+nix run ~/yeschef/yeschef-src -- <args>    # reproducible default
+# e.g. nix run ~/yeschef/yeschef-src -- spawn <project> <branch> -p "..."
 ```
 
-Edits to `~/.yeschef/yeschef-src` take effect on the next invocation. For tight loops,
+Edits to `~/yeschef/yeschef-src` take effect on the next invocation. For tight loops,
 `cargo` rebuilds faster (also runnable from anywhere):
 
 ```
-cargo run --manifest-path ~/.yeschef/yeschef-src/Cargo.toml -- <args>
+cargo run --manifest-path ~/yeschef/yeschef-src/Cargo.toml -- <args>
 ```
 
 **Everywhere below, `yeschef <args>` is shorthand for one of those two commands** — there
@@ -117,7 +117,7 @@ For each piece of work the human gives you:
   real `yeschef send` overrides it; don't try to clear it with Escape/Ctrl-U/backspace
   (those won't touch it because the buffer is actually empty).
 - **Long prompts are safe — they're delivered via a file, not the command line.**
-  `spawn` writes your `-p` prompt to `~/.yeschef/prompts/<project>-<sanitized-branch>.md`
+  `spawn` writes your `-p` prompt to `~/yeschef/prompts/<project>-<sanitized-branch>.md`
   and launches the agent with a short `Read the ticket brief at <that-path> and carry it out
   start to finish.` instruction. So multi-paragraph prompts work fine (no `ENAMETOOLONG`
   failure), and the brief survives on disk if you need to re-point the agent at it.
@@ -128,7 +128,7 @@ For each piece of work the human gives you:
   with `yeschef send <project> <branch> "1"` (or whatever choice the dialog requires)
   and verify the agent started processing. Accepting the dialog usually swallows the
   initial instruction, so once the agent is idle at its input box, re-send it — e.g.
-  `yeschef send <project> <branch> "Read the ticket brief at ~/.yeschef/prompts/<project>-<branch>.md and carry it out start to finish."`
+  `yeschef send <project> <branch> "Read the ticket brief at ~/yeschef/prompts/<project>-<branch>.md and carry it out start to finish."`
   (the prompt file is still there from `spawn`).
 
 ## Recording the terminal for PRs
