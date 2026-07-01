@@ -44,11 +44,33 @@
           cargo = rustToolchain;
           rustc = rustToolchain;
         };
+        # The plain, unwrapped yeschef binary. `packages.default` wraps this to
+        # bake zmx onto PATH (see below); everything else builds from source.
+        yeschef-unwrapped = naersk'.buildPackage { src = ./.; };
       in
       {
         packages = {
           # nix build  /  nix run . -- <args>
-          default = naersk'.buildPackage { src = ./.; };
+          #
+          # The backend shells out to bare `zmx` (Command::new("zmx")), so the
+          # shipped binary must find zmx at runtime WITHOUT the user putting it
+          # on their PATH. We build the plain binary with naersk, then wrap it so
+          # the zmx package's bin dir is baked onto PATH. `--suffix` (not
+          # `--prefix`): if a user has explicitly installed their own zmx, that
+          # copy on the ambient PATH wins; ours is only the fallback for when
+          # zmx is absent. We wrap in a separate symlinkJoin derivation rather
+          # than via naersk's postInstall because naersk replays the install
+          # phase during its deps-only build too, so a postInstall wrapProgram
+          # would run twice and against a dummy src — wrapping outside naersk
+          # keeps it to the one real binary.
+          default = pkgs.symlinkJoin {
+            name = "yeschef";
+            paths = [ yeschef-unwrapped ];
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            postBuild = ''
+              wrapProgram $out/bin/yeschef --suffix PATH : ${zmx}/bin
+            '';
+          };
 
           # nix build .#check  — cargo check (type check without codegen)
           check = naersk'.buildPackage {
