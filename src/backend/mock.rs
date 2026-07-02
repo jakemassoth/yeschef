@@ -143,6 +143,9 @@ pub struct MockZmxBackend {
     pub windows: Arc<Mutex<HashMap<String, Vec<WindowInfo>>>>,
     /// Canned pane content keyed by "`session:window`".
     pub pane_contents: Arc<Mutex<HashMap<String, String>>>,
+    /// Canned VT-styled pane content (see `capture_pane_styled`), keyed by
+    /// "`session:window`".
+    pub styled_pane_contents: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl MockZmxBackend {
@@ -156,6 +159,14 @@ impl MockZmxBackend {
 
     pub fn with_pane(self, session: &str, window: &str, content: &str) -> Self {
         self.pane_contents
+            .lock()
+            .unwrap()
+            .insert(format!("{session}:{window}"), content.to_string());
+        self
+    }
+
+    pub fn with_styled_pane(self, session: &str, window: &str, content: &str) -> Self {
+        self.styled_pane_contents
             .lock()
             .unwrap()
             .insert(format!("{session}:{window}"), content.to_string());
@@ -234,6 +245,17 @@ impl ZmxBackend for MockZmxBackend {
         ));
         Ok(self
             .pane_contents
+            .lock()
+            .unwrap()
+            .get(&format!("{session}:{window}"))
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    fn capture_pane_styled(&self, session: &str, window: &str) -> Result<String> {
+        self.record(format!("capture_pane_styled:{session}:{window}"));
+        Ok(self
+            .styled_pane_contents
             .lock()
             .unwrap()
             .get(&format!("{session}:{window}"))

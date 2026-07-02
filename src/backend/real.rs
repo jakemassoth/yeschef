@@ -358,6 +358,24 @@ impl ZmxBackend for RealZmxBackend {
         }
     }
 
+    fn capture_pane_styled(&self, session: &str, window: &str) -> Result<String> {
+        let id = zid(session, window);
+        // `--vt` asks zmx to re-serialize its terminal model (colours, SGR
+        // attributes, cursor-addressed redraws) as a VT/ANSI byte stream
+        // instead of de-styled text. Returned whole, untrimmed: this is a
+        // stateful replay, not independent lines, so cutting it at an
+        // arbitrary line boundary risks severing an escape sequence.
+        let output = Command::new("zmx")
+            .args(["history", &id, "--vt"])
+            .output()
+            .context("failed to run 'zmx history --vt'")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("zmx history --vt failed for '{}': {}", id, stderr.trim());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
     fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>> {
         // Recover ticket windows from the set of `<session>-…` zmx sessions. zmx
         // exposes no per-session active/dead state (a finished ticket's session
@@ -407,7 +425,16 @@ impl ZmxBackend for RealZmxBackend {
                 .find(|s| s.starts_with(&prefix))
                 .ok_or_else(|| anyhow::anyhow!("no live yeschef sessions to attach to"))?
         };
+        // A caller running inside its own zmx session (e.g. a line cook
+        // invoking `yeschef tui` on itself) inherits `ZMX_SESSION`. If left
+        // set, `zmx attach <id>` ignores `id` entirely and reattaches to the
+        // *caller's own* session instead — discovered while recording this
+        // feature's demo from inside a yeschef-managed session. Clearing it
+        // (and the analogous prefix var) makes the explicit target always
+        // win, regardless of the environment `attach` is invoked from.
         let status = Command::new("zmx")
+            .env_remove("ZMX_SESSION")
+            .env_remove("ZMX_SESSION_PREFIX")
             .args(["attach", &id])
             .status()
             .context("failed to run 'zmx attach'")?;
