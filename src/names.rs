@@ -101,6 +101,18 @@ pub fn yeschef_session() -> &'static str {
     "yeschef"
 }
 
+/// The bare zmx session id of the pinned head-chef Claude Code session that the
+/// TUI shows alongside the brigade.
+///
+/// Deliberately *not* prefixed with [`yeschef_session`]: the real backend
+/// derives the brigade from zmx session ids by stripping the `yeschef-` prefix
+/// (see `list_windows` in `backend::real`), so a bare `headchef` id can never
+/// surface as a phantom ticket in the brigade list — it's addressed by its raw
+/// id via the backend's `*_raw` methods instead of the `<session>-<window>` map.
+pub fn headchef_session() -> &'static str {
+    "headchef"
+}
+
 /// Derive the ticket window name from project + sanitized branch.
 ///
 /// Avoids `.` and `:` (historically tmux target separators) so the name stays

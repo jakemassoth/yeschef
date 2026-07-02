@@ -15,8 +15,18 @@
 //! interaction with that session — see [`focus_session`] for why that's the
 //! right call given what zmx exposes. Leaving focus is zmx's own detach
 //! (`Ctrl+\`), which returns here automatically.
+//!
+//! ## The head chef
+//!
+//! Above the brigade sits a pinned **head chef** entry: a bare `headchef` zmx
+//! session (see [`headchef_session`]) running Claude Code in the yeschef source
+//! checkout, ensured on launch by [`ensure_headchef`]. It's the top of the
+//! navigable list (reachable with `k`/`g`, or jumped to directly with `C`) and
+//! previews / focuses exactly like a line cook — the only difference is it's
+//! addressed by its raw session id rather than through the brigade window map.
 
 use std::io::{self, Stdout};
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -34,7 +44,7 @@ use ratatui::{Frame, Terminal};
 use tui_term::widget::PseudoTerminal;
 
 use crate::config::Config;
-use crate::names::yeschef_session;
+use crate::names::{headchef_session, yeschef_session};
 
 /// How often the pane refreshes when there's no input.
 const TICK: Duration = Duration::from_secs(1);
@@ -124,12 +134,18 @@ pub struct CookRow {
 }
 
 /// Pure UI state: the brigade list, the selected index, and the captured pane
-/// text for the selected line cook. Constructible and testable without a
+/// text for the current selection. Constructible and testable without a
 /// terminal.
+///
+/// The selection is a unified list with the pinned head chef at the top: when
+/// `on_headchef` is set the head-chef entry is selected and `selected` (the
+/// brigade cursor) is ignored; otherwise `selected` indexes the brigade.
 #[derive(Debug, Default)]
 pub struct App {
     brigade: Vec<CookRow>,
     selected: usize,
+    /// Whether the pinned head-chef entry (above the brigade) is selected.
+    on_headchef: bool,
     pane: String,
 }
 
@@ -150,12 +166,22 @@ impl App {
         &self.pane
     }
 
-    /// The currently-selected line cook, if the brigade list is non-empty.
+    /// Whether the pinned head-chef entry is currently selected.
+    pub fn headchef_selected(&self) -> bool {
+        self.on_headchef
+    }
+
+    /// The currently-selected line cook, or `None` when the head chef is
+    /// selected (it isn't a line cook) or the brigade is empty.
     pub fn selected_cook(&self) -> Option<&CookRow> {
+        if self.on_headchef {
+            return None;
+        }
         self.brigade.get(self.selected)
     }
 
-    /// The window name to capture for the current selection.
+    /// The window name to capture for the current line-cook selection (`None`
+    /// for the head chef, which is captured by its raw session id instead).
     pub fn selected_window(&self) -> Option<&str> {
         self.selected_cook().map(|c| c.window.as_str())
     }
@@ -180,6 +206,15 @@ impl App {
     }
 
     pub fn select_next(&mut self) {
+        if self.on_headchef {
+            // The head chef sits above the brigade; descending off it enters
+            // the brigade at its first row (if any).
+            if !self.brigade.is_empty() {
+                self.on_headchef = false;
+                self.selected = 0;
+            }
+            return;
+        }
         if self.brigade.is_empty() {
             return;
         }
@@ -189,15 +224,36 @@ impl App {
     }
 
     pub fn select_prev(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        if self.on_headchef {
+            return; // already at the top of the list
+        }
+        if self.selected == 0 {
+            // Ascending off the first line cook lands on the pinned head chef.
+            self.on_headchef = true;
+        } else {
+            self.selected -= 1;
+        }
     }
 
+    /// Jump to the top of the list — the pinned head chef.
     pub fn select_first(&mut self) {
-        self.selected = 0;
+        self.on_headchef = true;
     }
 
+    /// Jump to the bottom of the list — the last line cook, or the head chef
+    /// when the brigade is empty.
     pub fn select_last(&mut self) {
-        self.selected = self.brigade.len().saturating_sub(1);
+        if self.brigade.is_empty() {
+            self.on_headchef = true;
+        } else {
+            self.on_headchef = false;
+            self.selected = self.brigade.len() - 1;
+        }
+    }
+
+    /// Select the pinned head-chef entry directly (the `C` shortcut).
+    pub fn select_headchef(&mut self) {
+        self.on_headchef = true;
     }
 }
 
@@ -227,15 +283,23 @@ fn load_brigade(config: &Config) -> Vec<CookRow> {
         .collect()
 }
 
-/// Capture the selected line cook's pane into the app (empty if none/error).
-/// Styled (VT/ANSI), not plain — see [`render_pane`] for why.
+/// Capture the current selection's pane into the app (empty if none/error).
+/// Styled (VT/ANSI), not plain — see [`render_pane`] for why. The head chef is
+/// captured by its raw session id; line cooks through the brigade window map.
 fn recapture(config: &Config, app: &mut App) {
-    let pane = match app.selected_window() {
-        Some(window) => config
+    let pane = if app.headchef_selected() {
+        config
             .zmx
-            .capture_pane_styled(yeschef_session(), window)
-            .unwrap_or_default(),
-        None => String::new(),
+            .capture_raw_styled(headchef_session())
+            .unwrap_or_default()
+    } else {
+        match app.selected_window() {
+            Some(window) => config
+                .zmx
+                .capture_pane_styled(yeschef_session(), window)
+                .unwrap_or_default(),
+            None => String::new(),
+        }
     };
     app.set_pane(pane);
 }
@@ -246,9 +310,28 @@ fn refresh(config: &Config, app: &mut App) {
     recapture(config, app);
 }
 
+/// Ensure the pinned head-chef Claude Code session exists, launching `claude`
+/// in `src_dir` (the yeschef source checkout) if the bare `headchef` zmx
+/// session is absent. Idempotent: an existing session is left running
+/// untouched — never restarted or duplicated. Best-effort: a `zmx run` failure
+/// is swallowed so the TUI still opens (the head-chef pane just previews empty)
+/// rather than blocking the brigade view on the head chef.
+fn ensure_headchef(config: &Config, src_dir: &Path) {
+    let _ = config
+        .zmx
+        .ensure_raw_session(headchef_session(), src_dir, "claude");
+}
+
 /// Entry point for `yeschef tui`. Sets up the terminal, runs the event loop,
 /// and always restores the terminal afterwards.
 pub fn run_tui(config: &Config) -> Result<()> {
+    // Ensure the head chef before we take over the terminal. If the source
+    // checkout can't be resolved we skip it (the head-chef pane just previews
+    // empty) rather than block the whole TUI on it.
+    if let Ok(src) = crate::config::resolve_src_dir() {
+        ensure_headchef(config, &src);
+    }
+
     enable_raw_mode().context("failed to enable raw mode")?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).context("failed to enter alternate screen")?;
@@ -285,16 +368,23 @@ fn run_loop(config: &Config, terminal: &mut Terminal<CrosstermBackend<Stdout>>) 
                     KeyCode::Char('k') | KeyCode::Up => app.select_prev(),
                     KeyCode::Char('g') => app.select_first(),
                     KeyCode::Char('G') => app.select_last(),
+                    // Capital `C` jumps straight to the pinned head chef.
+                    KeyCode::Char('C') => app.select_headchef(),
                     KeyCode::Enter => {
-                        // Gone means the zmx session no longer exists — nothing
-                        // to attach to. Dead (foreground process exited but the
-                        // session lingers) still has a live shell worth visiting.
-                        let window = app
-                            .selected_cook()
-                            .filter(|c| c.state != CookState::Gone)
-                            .map(|c| c.window.clone());
-                        if let Some(window) = window {
-                            let _ = focus_session(config, terminal, &window);
+                        if app.headchef_selected() {
+                            let _ = focus_headchef(config, terminal);
+                        } else {
+                            // Gone means the zmx session no longer exists —
+                            // nothing to attach to. Dead (foreground process
+                            // exited but the session lingers) still has a live
+                            // shell worth visiting.
+                            let window = app
+                                .selected_cook()
+                                .filter(|c| c.state != CookState::Gone)
+                                .map(|c| c.window.clone());
+                            if let Some(window) = window {
+                                let _ = focus_session(config, terminal, &window);
+                            }
                         }
                         refresh(config, &mut app);
                         continue;
@@ -350,6 +440,32 @@ fn focus_session<B: Backend + io::Write>(
     result
 }
 
+/// Focus the pinned head-chef session, exactly as [`focus_session`] focuses a
+/// line cook — the only difference is the attach target is the bare `headchef`
+/// session id ([`headchef_session`]) rather than a brigade window.
+///
+/// Kept as a separate function that mirrors [`focus_session`]'s suspend/attach/
+/// restore dance rather than sharing a refactored helper: this feature is
+/// additive and must not disturb `focus_session`, which is being edited on
+/// another branch. If you change the suspend/restore handling in one, mirror
+/// it in the other.
+fn focus_headchef<B: Backend + io::Write>(
+    config: &Config,
+    terminal: &mut Terminal<B>,
+) -> Result<()> {
+    disable_raw_mode().context("failed to disable raw mode")?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)
+        .context("failed to leave alternate screen")?;
+
+    let result = config.zmx.attach_raw(headchef_session());
+
+    let _ = enable_raw_mode();
+    let _ = execute!(terminal.backend_mut(), EnterAlternateScreen);
+    let _ = terminal.clear();
+
+    result
+}
+
 fn ui(frame: &mut Frame, app: &App) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -368,13 +484,39 @@ fn ui(frame: &mut Frame, app: &App) {
 
 fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect) {
     let help = Line::styled(
-        " j/k move  ·  g/G top/bottom  ·  Enter focus session  ·  Ctrl+\\ back to list  ·  q quit ",
+        " j/k move  ·  g/G top/bottom  ·  C head chef  ·  Enter focus  ·  Ctrl+\\ back  ·  q quit ",
         Style::default().fg(Color::DarkGray),
     );
     frame.render_widget(Paragraph::new(help), area);
 }
 
 fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    // Pin the head chef above the brigade: a small bordered entry at the top,
+    // the scrollable brigade list filling the rest.
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .split(area);
+
+    render_headchef_entry(frame, app, parts[0]);
+    render_brigade(frame, app, parts[1]);
+}
+
+/// The pinned head-chef entry: visually distinct (magenta) and highlighted
+/// (reversed) when selected, mirroring how the brigade list highlights.
+fn render_headchef_entry(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let mut style = Style::default()
+        .fg(Color::Magenta)
+        .add_modifier(Modifier::BOLD);
+    if app.headchef_selected() {
+        style = style.add_modifier(Modifier::REVERSED);
+    }
+    let line = Line::from(Span::styled("★ head chef · claude", style));
+    let block = Block::default().title(" pinned ").borders(Borders::ALL);
+    frame.render_widget(Paragraph::new(line).block(block), area);
+}
+
+fn render_brigade(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let items: Vec<ListItem> = app
         .brigade()
         .iter()
@@ -398,7 +540,9 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .collect();
 
     let mut state = ListState::default();
-    if !app.brigade().is_empty() {
+    // Only highlight a brigade row when the selection is actually in the
+    // brigade — not when the pinned head chef is selected.
+    if !app.brigade().is_empty() && !app.headchef_selected() {
         state.select(Some(app.selected()));
     }
 
@@ -440,15 +584,27 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 /// be pixel-perfect. Focus mode (`Enter`, see [`focus_session`]) sidesteps
 /// this entirely by attaching for real, which resizes the pty to match.
 fn render_pane(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let title = match app.selected_cook() {
-        None => Line::from(" no line cooks — spawn one with 'yeschef spawn' "),
-        Some(c) => Line::from(vec![
-            Span::raw(format!(" {}/{} [", c.project, c.branch)),
-            Span::styled(c.state.label(), Style::default().fg(c.state.color())),
-            Span::raw("] "),
-            Span::styled(c.status.label(), Style::default().fg(c.status.color())),
-            Span::raw(" "),
-        ]),
+    let title = if app.headchef_selected() {
+        Line::from(vec![
+            Span::styled(
+                " ★ head chef ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("· claude ", Style::default().fg(Color::DarkGray)),
+        ])
+    } else {
+        match app.selected_cook() {
+            None => Line::from(" no line cooks — spawn one with 'yeschef spawn' "),
+            Some(c) => Line::from(vec![
+                Span::raw(format!(" {}/{} [", c.project, c.branch)),
+                Span::styled(c.state.label(), Style::default().fg(c.state.color())),
+                Span::raw("] "),
+                Span::styled(c.status.label(), Style::default().fg(c.status.color())),
+                Span::raw(" "),
+            ]),
+        }
     };
     let block = Block::default().title(title).borders(Borders::ALL);
     let inner = block.inner(area);
@@ -483,16 +639,23 @@ mod tests {
     }
 
     #[test]
-    fn empty_list_navigation_is_noop() {
+    fn empty_brigade_navigation_stays_valid() {
         let mut app = App::new();
         assert_eq!(app.selected(), 0);
+        assert!(!app.headchef_selected());
         assert!(app.selected_cook().is_none());
         assert!(app.selected_window().is_none());
 
+        // Descending with no cooks can't move into an empty brigade.
         app.select_next();
+        assert!(!app.headchef_selected());
+        assert_eq!(app.selected(), 0);
+
+        // Ascending / jump-to-top selects the always-present head chef; the
+        // brigade cursor stays a valid (zero) index behind it.
         app.select_prev();
-        app.select_last();
-        app.select_first();
+        assert!(app.headchef_selected());
+        assert!(app.selected_cook().is_none()); // the head chef isn't a cook
         assert_eq!(app.selected(), 0);
     }
 
@@ -508,25 +671,34 @@ mod tests {
     }
 
     #[test]
-    fn select_prev_stops_at_first() {
+    fn select_prev_off_first_cook_lands_on_head_chef() {
         let mut app = app_with(3);
         app.select_last();
         assert_eq!(app.selected(), 2);
+        assert!(!app.headchef_selected());
         app.select_prev();
         assert_eq!(app.selected(), 1);
         app.select_prev();
         assert_eq!(app.selected(), 0);
-        app.select_prev(); // saturates
-        assert_eq!(app.selected(), 0);
+        assert!(!app.headchef_selected());
+        // Ascending off the first cook selects the pinned head chef above it.
+        app.select_prev();
+        assert!(app.headchef_selected());
+        // Nothing sits above the head chef — a further prev stays put.
+        app.select_prev();
+        assert!(app.headchef_selected());
     }
 
     #[test]
     fn first_and_last_jump() {
         let mut app = app_with(5);
+        // G jumps to the last line cook.
         app.select_last();
+        assert!(!app.headchef_selected());
         assert_eq!(app.selected(), 4);
+        // g jumps to the top of the list — the pinned head chef.
         app.select_first();
-        assert_eq!(app.selected(), 0);
+        assert!(app.headchef_selected());
     }
 
     #[test]
@@ -593,6 +765,61 @@ mod tests {
         assert_eq!(app.selected_window(), Some("proj-b1"));
     }
 
+    #[test]
+    fn c_selects_head_chef() {
+        let mut app = app_with(3);
+        app.select_next();
+        assert!(!app.headchef_selected());
+        assert_eq!(app.selected(), 1);
+
+        app.select_headchef();
+        assert!(app.headchef_selected());
+        // The head chef isn't a line cook, so there's no cook/window under it.
+        assert!(app.selected_cook().is_none());
+        assert!(app.selected_window().is_none());
+    }
+
+    #[test]
+    fn descending_from_head_chef_enters_brigade() {
+        let mut app = app_with(3);
+        app.select_headchef();
+        assert!(app.headchef_selected());
+
+        app.select_next(); // j: head chef -> first line cook
+        assert!(!app.headchef_selected());
+        assert_eq!(app.selected(), 0);
+        assert_eq!(app.selected_window(), Some("proj-b0"));
+    }
+
+    #[test]
+    fn descending_from_head_chef_with_empty_brigade_stays() {
+        let mut app = App::new(); // no line cooks
+        app.select_headchef();
+        app.select_next(); // nothing below the head chef to move to
+        assert!(app.headchef_selected());
+    }
+
+    #[test]
+    fn g_and_capital_g_span_head_chef_and_brigade() {
+        let mut app = app_with(3);
+        app.select_first(); // g -> top of the list -> head chef
+        assert!(app.headchef_selected());
+        app.select_last(); // G -> bottom -> last line cook
+        assert!(!app.headchef_selected());
+        assert_eq!(app.selected(), 2);
+    }
+
+    #[test]
+    fn head_chef_selection_survives_brigade_refresh() {
+        let mut app = app_with(3);
+        app.select_headchef();
+        assert!(app.headchef_selected());
+        // A tick reloads the brigade; the head-chef selection must persist.
+        app.set_brigade((0..2).map(|i| row("proj", &format!("c{i}"))).collect());
+        assert!(app.headchef_selected());
+        assert!(app.selected_cook().is_none());
+    }
+
     /// `recapture` must fetch the VT-styled pane, not the plain one — the
     /// plain capture strips colour, which is exactly what the pane renderer
     /// needs preserved (see `render_pane`'s doc comment for why).
@@ -654,5 +881,76 @@ mod tests {
         assert_eq!(cell.contents(), "h");
         assert_eq!(cell.fgcolor(), vt100::Color::Idx(2)); // green
         assert_eq!(screen.contents(), "hello world");
+    }
+
+    fn head_chef_config(zmx: &crate::backend::mock::MockZmxBackend) -> (tempfile::TempDir, Config) {
+        use crate::backend::mock::MockGitBackend;
+        use crate::store::Store;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let config = Config {
+            home: tmp.path().to_path_buf(),
+            store,
+            git: Box::new(MockGitBackend::new()),
+            zmx: Box::new(zmx.clone()),
+        };
+        (tmp, config)
+    }
+
+    /// When the head chef is selected, `recapture` must read its *raw* session
+    /// id via `capture_raw_styled` — not the brigade `<session>-<window>` path
+    /// — and still preserve VT/ANSI styling.
+    #[test]
+    fn head_chef_recapture_uses_raw_styled_capture() {
+        use crate::backend::mock::MockZmxBackend;
+
+        let zmx =
+            MockZmxBackend::new().with_raw_styled_pane("headchef", "\x1b[35mhi chef\x1b[0m\n");
+        let (_tmp, config) = head_chef_config(&zmx);
+
+        let mut app = App::new();
+        app.select_headchef();
+        recapture(&config, &mut app);
+
+        assert!(app.pane().contains("hi chef"));
+        let calls = zmx.recorded_calls();
+        assert!(
+            calls.iter().any(|c| c == "capture_raw_styled:headchef"),
+            "calls: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("capture_pane_styled:")),
+            "the brigade window capture must not be used for the head chef: {calls:?}"
+        );
+    }
+
+    /// Launch ensures a bare `headchef` session running `claude` in the source
+    /// checkout, and is idempotent — a second call must not spawn a duplicate.
+    #[test]
+    fn ensure_headchef_launches_claude_in_src_and_is_idempotent() {
+        use crate::backend::mock::MockZmxBackend;
+
+        let zmx = MockZmxBackend::new();
+        let (_tmp, config) = head_chef_config(&zmx);
+        let src = Path::new("/home/u/yeschef/yeschef-src");
+
+        ensure_headchef(&config, src);
+        ensure_headchef(&config, src);
+
+        let calls = zmx.recorded_calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c == "ensure_raw_session:headchef:/home/u/yeschef/yeschef-src:claude"),
+            "calls: {calls:?}"
+        );
+        // The bare session is registered exactly once despite two ensure calls.
+        let sessions = zmx.existing_sessions.lock().unwrap();
+        assert_eq!(
+            sessions.iter().filter(|s| *s == "headchef").count(),
+            1,
+            "sessions: {sessions:?}"
+        );
     }
 }

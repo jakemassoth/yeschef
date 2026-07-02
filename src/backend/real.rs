@@ -443,6 +443,67 @@ impl ZmxBackend for RealZmxBackend {
         }
         Ok(())
     }
+
+    // ---- Bare-session (raw id) operations --------------------------------
+    //
+    // Deliberately self-contained twins of `new_window` / `capture_pane_styled`
+    // / `attach` above rather than a shared refactor: this feature is purely
+    // additive and must not touch those bodies, which are being edited on
+    // another branch. Each mirrors its twin's zmx invocation exactly, only
+    // targeting a raw session id (no `zid` namespacing). If you change a twin's
+    // zmx flags, mirror the change here.
+
+    fn ensure_raw_session(&self, id: &str, cwd: &Path, command: &str) -> Result<()> {
+        // Idempotent: leave an existing session running untouched, so
+        // re-opening the TUI never restarts or duplicates the head chef.
+        if zmx_sessions()?.iter().any(|s| s == id) {
+            return Ok(());
+        }
+        // Same launch shape as `new_window`: zmx has no working-directory flag,
+        // so `cd` first and run through a login shell for a full environment.
+        let full = format!(
+            "cd {} && {command}",
+            shell_single_quote(&cwd.to_string_lossy())
+        );
+        let status = Command::new("zmx")
+            .args(["run", id, "-d", "sh", "-lc", &full])
+            .status()
+            .context("failed to run 'zmx run' for a bare session")?;
+        if !status.success() {
+            bail!("zmx run failed for bare session '{id}'");
+        }
+        Ok(())
+    }
+
+    fn capture_raw_styled(&self, id: &str) -> Result<String> {
+        // `--vt` re-serializes zmx's terminal model as a VT/ANSI stream; see
+        // `capture_pane_styled`. Returned whole, untrimmed (stateful replay).
+        let output = Command::new("zmx")
+            .args(["history", id, "--vt"])
+            .output()
+            .context("failed to run 'zmx history --vt' for a bare session")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("zmx history --vt failed for '{}': {}", id, stderr.trim());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    fn attach_raw(&self, id: &str) -> Result<()> {
+        // The same `ZMX_SESSION`/`ZMX_SESSION_PREFIX` clearing as `attach`: a
+        // caller inside its own zmx session would otherwise have `zmx attach`
+        // ignore `id` and reattach to the caller's own session instead.
+        let status = Command::new("zmx")
+            .env_remove("ZMX_SESSION")
+            .env_remove("ZMX_SESSION_PREFIX")
+            .args(["attach", id])
+            .status()
+            .context("failed to run 'zmx attach' for a bare session")?;
+        if !status.success() {
+            bail!("zmx attach failed for bare session '{id}'");
+        }
+        Ok(())
+    }
 }
 
 /// Wrap a string in single quotes for safe inclusion in a `sh -lc` command,

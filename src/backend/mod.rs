@@ -90,4 +90,26 @@ pub trait ZmxBackend: Send + Sync {
     fn kill_window(&self, session: &str, window: &str) -> Result<()>;
     /// Attach to the session; if `window` is given, select it first.
     fn attach(&self, session: &str, window: Option<&str>) -> Result<()>;
+
+    // ---- Bare-session (raw id) operations --------------------------------
+    //
+    // The methods above address a ticket window and go through the brigade's
+    // `<session>-<window>` id mapping. The `*_raw` methods below target a
+    // standalone zmx session by its exact id, with no namespacing — used for
+    // the TUI's pinned head-chef session (`names::headchef_session`), which is
+    // a bare `headchef` session running Claude Code rather than a brigade
+    // ticket. See `commands::tui`.
+
+    /// Ensure a bare zmx session with the exact id `id` exists, launching
+    /// `command` in `cwd` if it is absent. Idempotent: an already-running
+    /// session is left untouched (never restarted or duplicated).
+    fn ensure_raw_session(&self, id: &str, cwd: &Path, command: &str) -> Result<()>;
+    /// Capture a bare session's full scrollback as a VT/ANSI byte stream, like
+    /// [`capture_pane_styled`](Self::capture_pane_styled) but addressing the
+    /// session by its raw id. Must not be trimmed by naive line-splitting for
+    /// the same reason (a straddling escape sequence would be corrupted).
+    fn capture_raw_styled(&self, id: &str) -> Result<String>;
+    /// Attach to a bare session by its raw id, like [`attach`](Self::attach)
+    /// but without the brigade-window namespacing.
+    fn attach_raw(&self, id: &str) -> Result<()>;
 }
