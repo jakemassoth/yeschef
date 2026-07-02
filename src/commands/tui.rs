@@ -16,7 +16,7 @@
 //! right call given what zmx exposes. Leaving focus is zmx's own detach
 //! (`Ctrl+\`), which returns here automatically.
 
-use std::io;
+use std::io::{self, Stdout};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -265,7 +265,7 @@ pub fn run_tui(config: &Config) -> Result<()> {
     result
 }
 
-fn run_loop<B: Backend + io::Write>(config: &Config, terminal: &mut Terminal<B>) -> Result<()> {
+fn run_loop(config: &Config, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     let mut app = App::new();
     refresh(config, &mut app);
 
