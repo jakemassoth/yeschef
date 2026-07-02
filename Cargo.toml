@@ -11,6 +11,8 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 dirs = "5"
 tempfile = "3"
 ratatui = "0.29"
+vt100 = "0.15.2"
+tui-term = "0.2.0"
 
 [[bin]]
 name = "yeschef"

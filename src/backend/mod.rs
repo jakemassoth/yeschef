@@ -79,6 +79,13 @@ pub trait ZmxBackend: Send + Sync {
     fn send_keys(&self, session: &str, window: &str, text: &str) -> Result<()>;
     /// Capture the visible pane of a window. `lines` limits to the last N lines.
     fn capture_pane(&self, session: &str, window: &str, lines: Option<usize>) -> Result<String>;
+    /// Capture a window's full scrollback as a VT/ANSI byte stream (colours,
+    /// attributes, cursor-addressed redraws) rather than de-styled text —
+    /// suitable for replaying through a real terminal-emulation parser.
+    /// Unlike [`capture_pane`](Self::capture_pane) this must not be trimmed
+    /// by naive line-splitting: an escape sequence straddling the trim point
+    /// would be truncated mid-sequence and corrupt the replay.
+    fn capture_pane_styled(&self, session: &str, window: &str) -> Result<String>;
     fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>>;
     fn kill_window(&self, session: &str, window: &str) -> Result<()>;
     /// Attach to the session; if `window` is given, select it first.
