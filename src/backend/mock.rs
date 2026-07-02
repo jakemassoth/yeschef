@@ -173,6 +173,16 @@ impl MockZmxBackend {
         self
     }
 
+    /// Pre-seed the VT-styled content a bare session reports from
+    /// `capture_raw_styled`, keyed by its raw id (no `session:window`).
+    pub fn with_raw_styled_pane(self, id: &str, content: &str) -> Self {
+        self.styled_pane_contents
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), content.to_string());
+        self
+    }
+
     fn record(&self, call: String) {
         self.calls.lock().unwrap().push(call);
     }
@@ -284,6 +294,38 @@ impl ZmxBackend for MockZmxBackend {
 
     fn attach(&self, session: &str, window: Option<&str>) -> Result<()> {
         self.record(format!("attach:{session}:{}", window.unwrap_or("-")));
+        Ok(())
+    }
+
+    fn ensure_raw_session(&self, id: &str, cwd: &Path, command: &str) -> Result<()> {
+        self.record(format!(
+            "ensure_raw_session:{}:{}:{}",
+            id,
+            cwd.display(),
+            command
+        ));
+        // Idempotent, mirroring the real backend: only register the bare
+        // session when it's absent, so a second call is a no-op.
+        let mut sessions = self.existing_sessions.lock().unwrap();
+        if !sessions.contains(&id.to_string()) {
+            sessions.push(id.to_string());
+        }
+        Ok(())
+    }
+
+    fn capture_raw_styled(&self, id: &str) -> Result<String> {
+        self.record(format!("capture_raw_styled:{id}"));
+        Ok(self
+            .styled_pane_contents
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    fn attach_raw(&self, id: &str) -> Result<()> {
+        self.record(format!("attach_raw:{id}"));
         Ok(())
     }
 }
