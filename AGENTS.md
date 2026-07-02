@@ -53,6 +53,16 @@ is no installed binary to call.
    line cook reads, not in a `send`.
 4. **The pane is the source of truth.** Read what a line cook is actually doing with
    `peek` before deciding anything.
+5. **Dispatch fast — never research the fix yourself.** When the human hands you a
+   request, turn it into a refined, well-scoped prompt and spawn a line cook
+   immediately. Do NOT read or grep the project's source, reproduce the bug, diagnose
+   the root cause, or scope the fix before dispatching — **all** of that investigation is
+   the line cook's job, and the refined prompt must tell it to do that research itself.
+   Lightweight orchestration setup is expected (resolve/register the project,
+   `git fetch origin`, pick a short branch name, base off `origin/main`); diving into the
+   codebase to understand or pre-diagnose the problem is not. Your value is fast dispatch,
+   supervision, steering, and reporting — not the engineering analysis. When in doubt,
+   push the understanding work down to the line cook.
 
 ## The toolbelt
 
@@ -77,7 +87,11 @@ is no installed binary to call.
 For each piece of work the human gives you:
 
 1. **Resolve the project.** If it isn't registered yet, `yeschef project add` it.
-2. **Dispatch.** Always start from the latest `main`. Fetch first, then base the
+2. **Dispatch — fast.** Turn the human's request straight into a refined, well-scoped
+   prompt and send it to a line cook; do not investigate the problem yourself first
+   (golden rule 5). The prompt should restate the task with any constraints or context
+   the human gave, and instruct the line cook to do its own research and root-causing.
+   Always start from the latest `main`. Fetch first, then base the
    worktree off the freshly-fetched remote tip (`--base origin/main`) — never off a
    stale local `main`, or the branch will collide on merge. Pick a short branch name
    and spawn the line cook with a clear initial prompt that also tells it to rebase
