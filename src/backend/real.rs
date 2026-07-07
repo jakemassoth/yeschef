@@ -432,16 +432,11 @@ impl ZmxBackend for RealZmxBackend {
         // feature's demo from inside a yeschef-managed session. Clearing it
         // (and the analogous prefix var) makes the explicit target always
         // win, regardless of the environment `attach` is invoked from.
-        let status = Command::new("zmx")
-            .env_remove("ZMX_SESSION")
+        let mut cmd = Command::new("zmx");
+        cmd.env_remove("ZMX_SESSION")
             .env_remove("ZMX_SESSION_PREFIX")
-            .args(["attach", &id])
-            .status()
-            .context("failed to run 'zmx attach'")?;
-        if !status.success() {
-            bail!("zmx attach failed for '{id}'");
-        }
-        Ok(())
+            .args(["attach", &id]);
+        run_attach_restoring_detach(cmd).with_context(|| format!("zmx attach failed for '{id}'"))
     }
 
     // ---- Bare-session (raw id) operations --------------------------------
@@ -493,17 +488,64 @@ impl ZmxBackend for RealZmxBackend {
         // The same `ZMX_SESSION`/`ZMX_SESSION_PREFIX` clearing as `attach`: a
         // caller inside its own zmx session would otherwise have `zmx attach`
         // ignore `id` and reattach to the caller's own session instead.
-        let status = Command::new("zmx")
-            .env_remove("ZMX_SESSION")
+        let mut cmd = Command::new("zmx");
+        cmd.env_remove("ZMX_SESSION")
             .env_remove("ZMX_SESSION_PREFIX")
-            .args(["attach", id])
-            .status()
-            .context("failed to run 'zmx attach' for a bare session")?;
-        if !status.success() {
-            bail!("zmx attach failed for bare session '{id}'");
-        }
-        Ok(())
+            .args(["attach", id]);
+        run_attach_restoring_detach(cmd)
+            .with_context(|| format!("zmx attach failed for bare session '{id}'"))
     }
+}
+
+/// Run `zmx attach` (spawned from the given prepared `Command`) and, once it has
+/// taken over the terminal, restore zmx's `Ctrl+\` detach key.
+///
+/// # Why this exists
+///
+/// zmx detaches when it reads the raw byte `0x1C` (`Ctrl+\`) from the terminal.
+/// But a session running a full-screen app that enables an *enhanced keyboard
+/// protocol* — xterm "modifyOtherKeys" (`CSI > 4 ; 2 m`) or the kitty keyboard
+/// protocol — makes the terminal encode `Ctrl+\` as an escape sequence
+/// (`CSI 27 ; 5 ; 92 ~`) instead of the raw `0x1C` byte. `zmx attach` faithfully
+/// replays the session's saved terminal modes to our terminal on attach, so the
+/// mode is active the moment we attach, and zmx never sees its detach byte —
+/// `Ctrl+\` silently does nothing and the user is stuck. This bites when
+/// focusing the head chef's Claude Code session (Claude Code enables
+/// modifyOtherKeys), while an idle line cook detaches fine.
+///
+/// # What we do
+///
+/// After zmx has replayed the session state, we write the sequences that turn
+/// those enhanced keyboard modes back off, so `Ctrl+\` reaches zmx as raw
+/// `0x1C` again. The short sleep lets zmx's replay land first (otherwise we'd
+/// disable the mode before the replay re-enables it).
+///
+/// # Tradeoff / proper fix
+///
+/// While focused, the app loses enhanced key disambiguation (e.g. it can't tell
+/// `Shift+Enter` from `Enter`) until you leave and re-attach — an acceptable
+/// price for being able to detach at all. The clean fix belongs in zmx itself:
+/// its detach handler should also recognize the encoded `Ctrl+\` (or not replay
+/// input-only keyboard modes to the client). This is a yeschef-side mitigation.
+fn run_attach_restoring_detach(mut cmd: Command) -> Result<()> {
+    use std::io::Write;
+
+    let mut child = cmd.spawn().context("failed to run 'zmx attach'")?;
+
+    // Let zmx finish replaying the session's saved terminal state (which
+    // re-enables the enhanced keyboard mode) before we turn it back off.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    // `CSI > 4 ; 0 m` disables xterm modifyOtherKeys; `CSI < u` pops any kitty
+    // keyboard flags. Both are no-ops if the mode was never enabled.
+    let mut out = std::io::stdout();
+    let _ = out.write_all(b"\x1b[>4;0m\x1b[<u");
+    let _ = out.flush();
+
+    let status = child.wait().context("failed to wait for 'zmx attach'")?;
+    if !status.success() {
+        bail!("zmx attach exited with failure");
+    }
+    Ok(())
 }
 
 /// Wrap a string in single quotes for safe inclusion in a `sh -lc` command,

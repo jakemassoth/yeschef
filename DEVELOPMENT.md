@@ -149,6 +149,18 @@ separators) so the derived name stays a clean zmx session id.
   missing session yields an empty list, not an error. zmx exposes no per-session
   active/dead state, so a finished ticket's session simply disappears — it surfaces as
   "gone" in `status`, never "dead".
+- **`Ctrl+\` detach vs. enhanced keyboard protocols.** zmx detaches when it reads the
+  raw byte `0x1C` (`Ctrl+\`). A focused session running a full-screen app that enables
+  an *enhanced keyboard protocol* — xterm "modifyOtherKeys" (`CSI > 4 ; 2 m`) or the
+  kitty keyboard protocol — makes the terminal encode `Ctrl+\` as an escape sequence
+  (`CSI 27 ; 5 ; 92 ~`) instead of `0x1C`, and `zmx attach` replays that mode to the
+  client on attach — so zmx never sees its detach byte and `Ctrl+\` silently does
+  nothing. This bit the head-chef entry (Claude Code enables modifyOtherKeys) while
+  idle line cooks detached fine. `run_attach_restoring_detach` in `backend/real.rs`
+  mitigates it by disabling those modes right after zmx's replay so `Ctrl+\` reaches
+  zmx raw again (tradeoff: the app loses enhanced key disambiguation while focused).
+  The clean fix belongs in zmx — its detach handler should also recognize the encoded
+  `Ctrl+\`, or not replay input-only keyboard modes to the client.
 
 ## Home directory
 
