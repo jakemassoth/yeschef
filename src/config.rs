@@ -78,6 +78,23 @@ pub fn resolve_home() -> Result<PathBuf> {
     Ok(home.join("yeschef"))
 }
 
+/// Resolve the yeschef **source checkout** directory — the working directory
+/// for the head-chef Claude Code session the TUI pins (see `commands::tui`).
+/// Defaults to the canonical `~/yeschef/yeschef-src` (see CLAUDE.md), and is
+/// overridable via `YESCHEF_SRC` for non-standard layouts and tests.
+///
+/// Deliberately *not* `env!("CARGO_MANIFEST_DIR")`: the shipped binary is
+/// commonly built via nix, so the compile-time manifest path points into the
+/// read-only nix store rather than the user's editable checkout. This resolves
+/// the canonical runtime path instead, independent of where the binary lives.
+pub fn resolve_src_dir() -> Result<PathBuf> {
+    if let Ok(env_src) = std::env::var("YESCHEF_SRC") {
+        return Ok(PathBuf::from(env_src));
+    }
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    Ok(home.join("yeschef").join("yeschef-src"))
+}
+
 /// Validate that all required host binaries are available.
 pub fn check_host_deps() -> Result<()> {
     check_binary("git").context("'git' is required")?;
