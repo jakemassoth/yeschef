@@ -69,9 +69,11 @@ fn sanitize_for_project(s: &str) -> String {
     result
 }
 
-/// Sanitize a branch name for use in derived window / zmx session names.
+/// Sanitize a branch name for use in derived window / tmux session names.
 /// Replace any char not in `[a-z0-9-]` with `-`, collapse consecutive `-`,
-/// strip leading/trailing `-`.
+/// strip leading/trailing `-`. Notably this strips `.` and `:`, which tmux
+/// treats as target separators (`session:window.pane`), so the sanitized name
+/// stays a clean tmux target.
 pub fn sanitize_branch(branch: &str) -> String {
     let lower = branch.to_lowercase();
     let mut result: String = lower
@@ -95,17 +97,17 @@ pub fn sanitize_branch(branch: &str) -> String {
 
 /// The brigade session name that namespaces every ticket window.
 ///
-/// The real zmx backend maps each ticket window onto a standalone zmx session
+/// The real tmux backend maps each ticket window onto a standalone tmux session
 /// named `<yeschef_session>-<window>`.
 pub fn yeschef_session() -> &'static str {
     "yeschef"
 }
 
-/// The bare zmx session id of the pinned head-chef Claude Code session that the
+/// The bare tmux session id of the pinned head-chef Claude Code session that the
 /// TUI shows alongside the brigade.
 ///
 /// Deliberately *not* prefixed with [`yeschef_session`]: the real backend
-/// derives the brigade from zmx session ids by stripping the `yeschef-` prefix
+/// derives the brigade from tmux session ids by stripping the `yeschef-` prefix
 /// (see `list_windows` in `backend::real`), so a bare `headchef` id can never
 /// surface as a phantom ticket in the brigade list — it's addressed by its raw
 /// id via the backend's `*_raw` methods instead of the `<session>-<window>` map.
@@ -115,9 +117,9 @@ pub fn headchef_session() -> &'static str {
 
 /// Derive the ticket window name from project + sanitized branch.
 ///
-/// Avoids `.` and `:` (historically tmux target separators) so the name stays
-/// safe to embed in a zmx session id. `sanitize_branch` already strips `.`/`:`,
-/// so a `-` join is safe.
+/// Avoids `.` and `:` (tmux target separators) so the name stays safe to embed
+/// in a tmux session id. `sanitize_branch` already strips `.`/`:`, so a `-`
+/// join is safe.
 pub fn window_name(project: &str, sanitized_branch: &str) -> String {
     format!("{project}-{sanitized_branch}")
 }
@@ -168,9 +170,9 @@ mod tests {
 
     #[test]
     fn window_name_is_target_safe() {
-        // sanitize_branch + window_name must never produce `.` or `:`
-        // (historically tmux target separators) so the name stays safe to
-        // embed as a zmx session id.
+        // sanitize_branch + window_name must never produce `.` or `:` (tmux
+        // target separators) so the name stays safe to embed as a tmux session
+        // id.
         let w = window_name("proj", &sanitize_branch("feature/x.y:z"));
         assert!(!w.contains('.') && !w.contains(':'), "got {w}");
     }

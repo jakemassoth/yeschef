@@ -2,16 +2,22 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::backend::real::{check_binary, RealGitBackend, RealZmxBackend};
-use crate::backend::{GitBackend, ZmxBackend};
+use crate::backend::real::{check_binary, RealGitBackend, RealTmuxBackend};
+use crate::backend::{GitBackend, TmuxBackend};
 use crate::store::Store;
+
+/// yeschef's own tmux configuration, baked into the binary and written to
+/// `<home>/tmux.conf` at load. Loaded via `tmux -f` on a private socket so
+/// yeschef never reads or clobbers the user's `~/.tmux.conf`. Ships the
+/// `extended-keys` settings that let Claude Code see Shift+Enter.
+const TMUX_CONF: &str = include_str!("../tmux.conf");
 
 /// Runtime configuration: home directory + backend handles.
 pub struct Config {
     pub home: PathBuf,
     pub store: Store,
     pub git: Box<dyn GitBackend>,
-    pub zmx: Box<dyn ZmxBackend>,
+    pub tmux: Box<dyn TmuxBackend>,
 }
 
 impl Config {
@@ -21,11 +27,12 @@ impl Config {
         let home = resolve_home()?;
         let db_path = home.join("yeschef.db");
         let store = Store::open(&db_path).context("failed to open yeschef database")?;
+        let tmux_conf = ensure_tmux_conf(&home)?;
         Ok(Self {
             home,
             store,
             git: Box::new(RealGitBackend),
-            zmx: Box::new(RealZmxBackend),
+            tmux: Box::new(RealTmuxBackend::new(tmux_conf)),
         })
     }
 
@@ -95,9 +102,22 @@ pub fn resolve_src_dir() -> Result<PathBuf> {
     Ok(home.join("yeschef").join("yeschef-src"))
 }
 
+/// Write yeschef's own tmux config to `<home>/tmux.conf` and return its path.
+/// Rewritten on every load so config changes ship with the binary. The private
+/// tmux server is launched with `tmux -f <this path>` (see `backend::real`),
+/// isolating yeschef's sessions from the user's `~/.tmux.conf`.
+pub fn ensure_tmux_conf(home: &std::path::Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(home)
+        .with_context(|| format!("failed to create yeschef home at {}", home.display()))?;
+    let path = home.join("tmux.conf");
+    std::fs::write(&path, TMUX_CONF)
+        .with_context(|| format!("failed to write tmux config at {}", path.display()))?;
+    Ok(path)
+}
+
 /// Validate that all required host binaries are available.
 pub fn check_host_deps() -> Result<()> {
     check_binary("git").context("'git' is required")?;
-    check_binary("zmx").context("'zmx' is required")?;
+    check_binary("tmux").context("'tmux' is required")?;
     Ok(())
 }

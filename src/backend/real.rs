@@ -3,7 +3,9 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-use super::{BranchStatus, GitBackend, WindowInfo, ZmxBackend};
+use std::path::PathBuf;
+
+use super::{BranchStatus, GitBackend, TmuxBackend, WindowInfo};
 
 // ---------------------------------------------------------------------------
 // GitBackend — wraps `git`
@@ -239,70 +241,156 @@ impl GitBackend for RealGitBackend {
 }
 
 // ---------------------------------------------------------------------------
-// ZmxBackend — wraps `zmx` (session attach/detach for the terminal)
+// TmuxBackend — wraps `tmux` (session attach/detach for the terminal)
 // ---------------------------------------------------------------------------
 //
-// zmx has no window concept — every session is a single PTY. The head chef
-// trait is window-oriented (one `yeschef` session holding many ticket windows),
-// so we map each `<session>:<window>` pair onto a standalone zmx session named
-// `<session>-<window>`. `session_exists`/`list_windows` then derive the
-// brigade's state from the set of `<session>-…` zmx sessions.
+// The head-chef trait is window-oriented (one `yeschef` brigade holding many
+// ticket windows). tmux has real windows, but yeschef maps each ticket window
+// onto its own standalone tmux session named `yeschef-<window>` so tickets are
+// fully isolated: each has an independent lifecycle and detaches on its own
+// without disturbing the others. `session_exists`/`list_windows` then derive
+// the brigade's state from the set of `yeschef-…` sessions.
+//
+// Every invocation runs against a private tmux server: a dedicated `-L` socket
+// with yeschef's own config file (`-f`). That keeps yeschef's sessions off the
+// user's default tmux server and stops it from reading or clobbering their
+// `~/.tmux.conf`. The config ships the `extended-keys`/`terminal-features`
+// settings that let Claude Code see Shift+Enter (see `config::ensure_tmux_conf`).
 
-pub struct RealZmxBackend;
+/// The `-L` socket name for yeschef's private tmux server. Sessions on this
+/// socket are isolated from the user's default (`~/.tmux`) server.
+pub const TMUX_SOCKET: &str = "yeschef";
 
-/// Build the flat zmx session id for a ticket window. zmx has no windows, so each
-/// window becomes its own session, namespaced under the brigade session name.
-fn zid(session: &str, window: &str) -> String {
+pub struct RealTmuxBackend {
+    /// Path to yeschef's own tmux config, passed via `-f` so the private server
+    /// starts with our `extended-keys`/scrollback settings and never sources
+    /// the user's `~/.tmux.conf`.
+    config_path: PathBuf,
+}
+
+impl RealTmuxBackend {
+    pub fn new(config_path: PathBuf) -> Self {
+        Self { config_path }
+    }
+
+    /// A `tmux` command pre-wired to yeschef's private server: the dedicated
+    /// `-L` socket plus `-f <our config>`. Global flags must precede the tmux
+    /// subcommand, so callers append the subcommand and its args after this.
+    fn cmd(&self) -> Command {
+        let mut c = Command::new("tmux");
+        c.arg("-L")
+            .arg(TMUX_SOCKET)
+            .arg("-f")
+            .arg(&self.config_path);
+        c
+    }
+
+    /// Launch `command` in a new detached session with the exact id `id`,
+    /// rooted at `cwd`. Shared by `new_window` (ticket windows) and
+    /// `ensure_raw_session` (the bare head-chef session). Runs through a login
+    /// shell so the agent inherits a full environment (PATH, etc.); `-c` sets
+    /// the pane's start directory. A generous initial size gives the detached
+    /// agent room to draw before a client attaches (tmux would otherwise
+    /// default to 80x24) and resizes to the client's size on attach.
+    fn launch_detached(&self, id: &str, cwd: &Path, command: &str) -> Result<()> {
+        let status = self
+            .cmd()
+            .args(["new-session", "-d", "-s", id, "-x", "200", "-y", "50", "-c"])
+            .arg(cwd)
+            .args(["sh", "-lc", command])
+            .status()
+            .context("failed to run 'tmux new-session'")?;
+        if !status.success() {
+            bail!("tmux new-session failed for '{id}'");
+        }
+        Ok(())
+    }
+
+    /// Capture a session's full scrollback as a VT/ANSI byte stream (SGR
+    /// colours/attributes preserved via `-e`), addressed by its exact id.
+    /// Shared by `capture_pane_styled` and `capture_raw_styled`. tmux joins
+    /// captured rows with bare LF; a VT parser reads LF as line-feed-only and
+    /// staircases the output, so normalize to CRLF to anchor each row at
+    /// column 0. Returned whole, untrimmed (the styled replay is a unit).
+    fn capture_styled(&self, id: &str) -> Result<String> {
+        let output = self
+            .cmd()
+            .args(["capture-pane", "-e", "-p", "-S", "-", "-t", id])
+            .output()
+            .context("failed to run 'tmux capture-pane -e'")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "tmux capture-pane -e failed for '{}': {}",
+                id,
+                stderr.trim()
+            );
+        }
+        let raw = String::from_utf8_lossy(&output.stdout);
+        Ok(raw.replace('\n', "\r\n"))
+    }
+
+    /// Attach the current terminal to the session with the exact id `id`.
+    /// Shared by `attach` and `attach_raw`. `TMUX` is cleared from the child
+    /// environment: a caller invoked from inside a yeschef tmux session (e.g. a
+    /// line cook running `yeschef tui` on itself) would otherwise have tmux
+    /// refuse to nest, or target the caller's own session. Clearing it makes
+    /// the explicit `-t` target always win.
+    fn attach_id(&self, id: &str) -> Result<()> {
+        let status = self
+            .cmd()
+            .env_remove("TMUX")
+            .args(["attach-session", "-t", id])
+            .status()
+            .context("failed to run 'tmux attach-session'")?;
+        if !status.success() {
+            bail!("tmux attach-session failed for '{id}'");
+        }
+        Ok(())
+    }
+
+    /// List the names of all sessions on yeschef's private server (one per line
+    /// via `list-sessions -F '#{session_name}'`). No server / no sessions
+    /// yields an empty list rather than an error.
+    fn sessions(&self) -> Result<Vec<String>> {
+        let output = self
+            .cmd()
+            .args(["list-sessions", "-F", "#{session_name}"])
+            .output()
+            .context("failed to run 'tmux list-sessions'")?;
+        if !output.status.success() {
+            // No server running yet (or no sessions) — not an error.
+            return Ok(Vec::new());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect())
+    }
+}
+
+/// Build the flat tmux session id for a ticket window: each window is its own
+/// standalone session, namespaced under the brigade session name.
+fn sid(session: &str, window: &str) -> String {
     format!("{session}-{window}")
 }
 
-/// List the names of all active zmx sessions (one per line via `zmx ls --short`).
-fn zmx_sessions() -> Result<Vec<String>> {
-    let output = Command::new("zmx")
-        .args(["ls", "--short"])
-        .output()
-        .context("failed to run 'zmx ls --short'")?;
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect())
-}
-
-impl ZmxBackend for RealZmxBackend {
+impl TmuxBackend for RealTmuxBackend {
     fn session_exists(&self, session: &str) -> Result<bool> {
         // The brigade "session" exists if any ticket session is registered under it.
         let prefix = format!("{session}-");
-        Ok(zmx_sessions()?.iter().any(|s| s.starts_with(&prefix)))
+        Ok(self.sessions()?.iter().any(|s| s.starts_with(&prefix)))
     }
 
     fn ensure_session(&self, _session: &str) -> Result<()> {
-        // No-op: zmx creates sessions lazily on `zmx run`, and there is no
-        // parent session to hold windows — each ticket window is its own session.
+        // No-op: there is no parent session to hold windows — each ticket window
+        // is its own tmux session, created lazily by `new_window`.
         Ok(())
     }
 
     fn new_window(&self, session: &str, window: &str, cwd: &Path, command: &str) -> Result<()> {
-        // `zmx run <name> -d <command...>` creates a detached session running
-        // the command. zmx has no working-directory flag, so we `cd` first and
-        // run everything through a login shell so the agent gets a full
-        // environment.
-        let id = zid(session, window);
-        let full = format!(
-            "cd {} && {command}",
-            shell_single_quote(&cwd.to_string_lossy())
-        );
-        let status = Command::new("zmx")
-            .args(["run", &id, "-d", "sh", "-lc", &full])
-            .status()
-            .context("failed to run 'zmx run'")?;
-        if !status.success() {
-            bail!("zmx run failed for '{id}'");
-        }
-        Ok(())
+        self.launch_detached(&sid(session, window), cwd, command)
     }
 
     fn window_exists(&self, session: &str, window: &str) -> Result<bool> {
@@ -310,79 +398,81 @@ impl ZmxBackend for RealZmxBackend {
     }
 
     fn send_keys(&self, session: &str, window: &str, text: &str) -> Result<()> {
-        let id = zid(session, window);
-        // `zmx send` writes raw bytes to the session PTY. Send the literal text,
-        // then a carriage return as a separate event to submit it (the PTY reads
-        // CR as Enter).
-        let status = Command::new("zmx")
-            .args(["send", &id, text])
+        let id = sid(session, window);
+        // `send-keys -l` sends the text literally (no key-name lookup, so text
+        // like "C-c" isn't interpreted); `--` guards leading dashes. Then a
+        // separate `Enter` submits it, mirroring how the agent's line editor
+        // reads a carriage return.
+        let status = self
+            .cmd()
+            .args(["send-keys", "-t", &id, "-l", "--", text])
             .status()
-            .context("failed to run 'zmx send'")?;
+            .context("failed to run 'tmux send-keys'")?;
         if !status.success() {
-            bail!("zmx send failed for '{id}'");
+            bail!("tmux send-keys failed for '{id}'");
         }
-        let status = Command::new("zmx")
-            .args(["send", &id, "\r"])
+        let status = self
+            .cmd()
+            .args(["send-keys", "-t", &id, "Enter"])
             .status()
-            .context("failed to run 'zmx send' (Enter)")?;
+            .context("failed to run 'tmux send-keys' (Enter)")?;
         if !status.success() {
-            bail!("zmx send (Enter) failed for '{id}'");
+            bail!("tmux send-keys (Enter) failed for '{id}'");
         }
         Ok(())
     }
 
     fn capture_pane(&self, session: &str, window: &str, lines: Option<usize>) -> Result<String> {
-        let id = zid(session, window);
-        // `zmx history` dumps the full session scrollback; it has no line-count
-        // flag, so trim to the last N lines ourselves.
-        let output = Command::new("zmx")
-            .args(["history", &id])
+        let id = sid(session, window);
+        // `capture-pane -p -S -` dumps the full scrollback (from the start of
+        // history) as de-styled text; trim to the last N lines ourselves, as
+        // tmux has no last-N flag.
+        let output = self
+            .cmd()
+            .args(["capture-pane", "-p", "-S", "-", "-t", &id])
             .output()
-            .context("failed to run 'zmx history'")?;
+            .context("failed to run 'tmux capture-pane'")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("zmx history failed for '{}': {}", id, stderr.trim());
+            bail!("tmux capture-pane failed for '{}': {}", id, stderr.trim());
         }
         let full = String::from_utf8_lossy(&output.stdout).into_owned();
-        match lines {
-            Some(n) => {
-                let all: Vec<&str> = full.lines().collect();
-                let start = all.len().saturating_sub(n);
-                let mut tail = all[start..].join("\n");
-                if full.ends_with('\n') {
-                    tail.push('\n');
-                }
-                Ok(tail)
-            }
-            None => Ok(full),
+        // `capture-pane` pads the visible pane to its full height with blank
+        // lines, so a session whose output sits near the top is followed by a
+        // screenful of blanks. Drop those trailing blanks before trimming to
+        // the last N lines — otherwise the N-line window lands entirely on
+        // padding and hides the real output (and `status`'s last-line probe
+        // comes up empty). zmx's `history` never padded, so this restores the
+        // same "last N lines of actual output" behaviour.
+        let all: Vec<&str> = full.lines().collect();
+        let end = all
+            .iter()
+            .rposition(|l| !l.trim().is_empty())
+            .map_or(0, |i| i + 1);
+        let content = &all[..end];
+        let tail = match lines {
+            Some(n) => &content[content.len().saturating_sub(n)..],
+            None => content,
+        };
+        let mut text = tail.join("\n");
+        if !text.is_empty() {
+            text.push('\n');
         }
+        Ok(text)
     }
 
     fn capture_pane_styled(&self, session: &str, window: &str) -> Result<String> {
-        let id = zid(session, window);
-        // `--vt` asks zmx to re-serialize its terminal model (colours, SGR
-        // attributes, cursor-addressed redraws) as a VT/ANSI byte stream
-        // instead of de-styled text. Returned whole, untrimmed: this is a
-        // stateful replay, not independent lines, so cutting it at an
-        // arbitrary line boundary risks severing an escape sequence.
-        let output = Command::new("zmx")
-            .args(["history", &id, "--vt"])
-            .output()
-            .context("failed to run 'zmx history --vt'")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("zmx history --vt failed for '{}': {}", id, stderr.trim());
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        self.capture_styled(&sid(session, window))
     }
 
     fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>> {
-        // Recover ticket windows from the set of `<session>-…` zmx sessions. zmx
-        // exposes no per-session active/dead state (a finished ticket's session
-        // simply disappears), so both flags are always false; a vanished ticket
-        // surfaces as "gone" rather than "dead" in `status`.
+        // Recover ticket windows from the set of `yeschef-…` sessions. A
+        // finished ticket's session is destroyed when its agent exits (tmux's
+        // default), so a vanished ticket surfaces as "gone" rather than "dead";
+        // both liveness flags stay false, matching `run_status`'s expectations.
         let prefix = format!("{session}-");
-        let windows = zmx_sessions()?
+        let windows = self
+            .sessions()?
             .into_iter()
             .filter_map(|s| {
                 s.strip_prefix(&prefix).map(|name| WindowInfo {
@@ -396,120 +486,62 @@ impl ZmxBackend for RealZmxBackend {
     }
 
     fn kill_window(&self, session: &str, window: &str) -> Result<()> {
-        let id = zid(session, window);
-        let output = Command::new("zmx")
-            .args(["kill", &id, "--force"])
+        let id = sid(session, window);
+        let output = self
+            .cmd()
+            .args(["kill-session", "-t", &id])
             .output()
-            .context("failed to run 'zmx kill'")?;
+            .context("failed to run 'tmux kill-session'")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // A session that's already gone is not an error for teardown.
-            if stderr.contains("not found") || stderr.contains("no such") {
+            if stderr.contains("can't find") || stderr.contains("no such") {
                 return Ok(());
             }
-            bail!("zmx kill failed for '{}': {}", id, stderr.trim());
+            bail!("tmux kill-session failed for '{}': {}", id, stderr.trim());
         }
         Ok(())
     }
 
     fn attach(&self, session: &str, window: Option<&str>) -> Result<()> {
-        // zmx attaches to a single session (one PTY). With a ticket selected,
-        // attach to that ticket's session directly; otherwise fall back to the
-        // first live ticket session in the brigade.
+        // With a ticket selected, attach to that ticket's session directly;
+        // otherwise fall back to the first live ticket session in the brigade.
         let id = if let Some(w) = window {
-            zid(session, w)
+            sid(session, w)
         } else {
             let prefix = format!("{session}-");
-            zmx_sessions()?
+            self.sessions()?
                 .into_iter()
                 .find(|s| s.starts_with(&prefix))
                 .ok_or_else(|| anyhow::anyhow!("no live yeschef sessions to attach to"))?
         };
-        // A caller running inside its own zmx session (e.g. a line cook
-        // invoking `yeschef tui` on itself) inherits `ZMX_SESSION`. If left
-        // set, `zmx attach <id>` ignores `id` entirely and reattaches to the
-        // *caller's own* session instead — discovered while recording this
-        // feature's demo from inside a yeschef-managed session. Clearing it
-        // (and the analogous prefix var) makes the explicit target always
-        // win, regardless of the environment `attach` is invoked from.
-        let status = Command::new("zmx")
-            .env_remove("ZMX_SESSION")
-            .env_remove("ZMX_SESSION_PREFIX")
-            .args(["attach", &id])
-            .status()
-            .context("failed to run 'zmx attach'")?;
-        if !status.success() {
-            bail!("zmx attach failed for '{id}'");
-        }
-        Ok(())
+        self.attach_id(&id)
     }
 
     // ---- Bare-session (raw id) operations --------------------------------
     //
-    // Deliberately self-contained twins of `new_window` / `capture_pane_styled`
-    // / `attach` above rather than a shared refactor: this feature is purely
-    // additive and must not touch those bodies, which are being edited on
-    // another branch. Each mirrors its twin's zmx invocation exactly, only
-    // targeting a raw session id (no `zid` namespacing). If you change a twin's
-    // zmx flags, mirror the change here.
+    // Twins of `new_window` / `capture_pane_styled` / `attach` that target a
+    // raw session id with no `sid` namespacing — used for the TUI's pinned
+    // head-chef session. They share the same private-server helpers
+    // (`launch_detached` / `capture_styled` / `attach_id`) as their namespaced
+    // counterparts, so the tmux invocation stays identical.
 
     fn ensure_raw_session(&self, id: &str, cwd: &Path, command: &str) -> Result<()> {
         // Idempotent: leave an existing session running untouched, so
         // re-opening the TUI never restarts or duplicates the head chef.
-        if zmx_sessions()?.iter().any(|s| s == id) {
+        if self.sessions()?.iter().any(|s| s == id) {
             return Ok(());
         }
-        // Same launch shape as `new_window`: zmx has no working-directory flag,
-        // so `cd` first and run through a login shell for a full environment.
-        let full = format!(
-            "cd {} && {command}",
-            shell_single_quote(&cwd.to_string_lossy())
-        );
-        let status = Command::new("zmx")
-            .args(["run", id, "-d", "sh", "-lc", &full])
-            .status()
-            .context("failed to run 'zmx run' for a bare session")?;
-        if !status.success() {
-            bail!("zmx run failed for bare session '{id}'");
-        }
-        Ok(())
+        self.launch_detached(id, cwd, command)
     }
 
     fn capture_raw_styled(&self, id: &str) -> Result<String> {
-        // `--vt` re-serializes zmx's terminal model as a VT/ANSI stream; see
-        // `capture_pane_styled`. Returned whole, untrimmed (stateful replay).
-        let output = Command::new("zmx")
-            .args(["history", id, "--vt"])
-            .output()
-            .context("failed to run 'zmx history --vt' for a bare session")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("zmx history --vt failed for '{}': {}", id, stderr.trim());
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        self.capture_styled(id)
     }
 
     fn attach_raw(&self, id: &str) -> Result<()> {
-        // The same `ZMX_SESSION`/`ZMX_SESSION_PREFIX` clearing as `attach`: a
-        // caller inside its own zmx session would otherwise have `zmx attach`
-        // ignore `id` and reattach to the caller's own session instead.
-        let status = Command::new("zmx")
-            .env_remove("ZMX_SESSION")
-            .env_remove("ZMX_SESSION_PREFIX")
-            .args(["attach", id])
-            .status()
-            .context("failed to run 'zmx attach' for a bare session")?;
-        if !status.success() {
-            bail!("zmx attach failed for bare session '{id}'");
-        }
-        Ok(())
+        self.attach_id(id)
     }
-}
-
-/// Wrap a string in single quotes for safe inclusion in a `sh -lc` command,
-/// escaping any embedded single quotes.
-fn shell_single_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 // ---------------------------------------------------------------------------

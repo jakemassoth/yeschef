@@ -61,14 +61,18 @@ pub struct WindowInfo {
     pub dead: bool,
 }
 
-/// Trait abstracting `zmx` terminal session operations.
+/// Trait abstracting `tmux` terminal session operations.
 ///
-/// The head chef models tickets as windows under a single `yeschef` session
-/// (see `names::yeschef_session`). zmx has no windows — the real backend maps
-/// each `<session>:<window>` onto a standalone zmx session. The head chef
-/// drives windows via `send_keys`/`capture_pane` without being attached; the
-/// human attaches separately to watch.
-pub trait ZmxBackend: Send + Sync {
+/// The head chef models tickets as windows under a single `yeschef` brigade
+/// (see `names::yeschef_session`). Each ticket window maps onto its own
+/// standalone tmux session named `yeschef-<window>` (see `backend::real`), so
+/// tickets are fully isolated — independent lifecycle, independent detach —
+/// which is the point of the per-ticket session model. All sessions live on a
+/// private tmux server (a dedicated `-L` socket) loaded with yeschef's own
+/// config, so they never touch the user's tmux server or `~/.tmux.conf`. The
+/// head chef drives windows via `send_keys`/`capture_pane` without being
+/// attached; the human attaches separately to watch.
+pub trait TmuxBackend: Send + Sync {
     fn session_exists(&self, session: &str) -> Result<bool>;
     /// Create the session (detached) if it does not already exist.
     fn ensure_session(&self, session: &str) -> Result<()>;
@@ -79,12 +83,12 @@ pub trait ZmxBackend: Send + Sync {
     fn send_keys(&self, session: &str, window: &str, text: &str) -> Result<()>;
     /// Capture the visible pane of a window. `lines` limits to the last N lines.
     fn capture_pane(&self, session: &str, window: &str, lines: Option<usize>) -> Result<String>;
-    /// Capture a window's full scrollback as a VT/ANSI byte stream (colours,
-    /// attributes, cursor-addressed redraws) rather than de-styled text —
-    /// suitable for replaying through a real terminal-emulation parser.
-    /// Unlike [`capture_pane`](Self::capture_pane) this must not be trimmed
-    /// by naive line-splitting: an escape sequence straddling the trim point
-    /// would be truncated mid-sequence and corrupt the replay.
+    /// Capture a window's full scrollback as a VT/ANSI byte stream (colours
+    /// and attributes preserved as SGR escapes) rather than de-styled text —
+    /// suitable for replaying through a real terminal-emulation parser. Line
+    /// separators are normalized to CRLF so the parser anchors each row at
+    /// column 0 (tmux emits bare LF, which a VT parser reads as a line-feed
+    /// only, staircasing the output). Returned whole, untrimmed.
     fn capture_pane_styled(&self, session: &str, window: &str) -> Result<String>;
     fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>>;
     fn kill_window(&self, session: &str, window: &str) -> Result<()>;
@@ -94,20 +98,19 @@ pub trait ZmxBackend: Send + Sync {
     // ---- Bare-session (raw id) operations --------------------------------
     //
     // The methods above address a ticket window and go through the brigade's
-    // `<session>-<window>` id mapping. The `*_raw` methods below target a
-    // standalone zmx session by its exact id, with no namespacing — used for
+    // `yeschef-<window>` id mapping. The `*_raw` methods below target a
+    // standalone tmux session by its exact id, with no namespacing — used for
     // the TUI's pinned head-chef session (`names::headchef_session`), which is
     // a bare `headchef` session running Claude Code rather than a brigade
     // ticket. See `commands::tui`.
 
-    /// Ensure a bare zmx session with the exact id `id` exists, launching
+    /// Ensure a bare tmux session with the exact id `id` exists, launching
     /// `command` in `cwd` if it is absent. Idempotent: an already-running
     /// session is left untouched (never restarted or duplicated).
     fn ensure_raw_session(&self, id: &str, cwd: &Path, command: &str) -> Result<()>;
     /// Capture a bare session's full scrollback as a VT/ANSI byte stream, like
     /// [`capture_pane_styled`](Self::capture_pane_styled) but addressing the
-    /// session by its raw id. Must not be trimmed by naive line-splitting for
-    /// the same reason (a straddling escape sequence would be corrupted).
+    /// session by its raw id (line separators likewise normalized to CRLF).
     fn capture_raw_styled(&self, id: &str) -> Result<String>;
     /// Attach to a bare session by its raw id, like [`attach`](Self::attach)
     /// but without the brigade-window namespacing.

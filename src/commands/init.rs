@@ -34,7 +34,7 @@ pub fn run_init() -> Result<()> {
 
     // Check host dependencies
     check_host_deps()?;
-    println!("all host dependencies verified (git, zmx)");
+    println!("all host dependencies verified (git, tmux)");
     println!(
         "run your head chef agent from {} to load AGENTS.md",
         home.display()

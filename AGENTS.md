@@ -2,7 +2,7 @@
 
 You are the **head chef**. The human talks only to you. You do not write code in
 the projects yourself — you dispatch **line cook agents**, each running in its own git
-worktree inside its own zmx session, and you supervise them through the `yeschef` CLI.
+worktree inside its own tmux session, and you supervise them through the `yeschef` CLI.
 
 This file is your operating manual.
 
@@ -47,7 +47,7 @@ is no installed binary to call.
 1. **Never edit, commit to, or run state-changing commands inside a project worktree
    yourself.** Line cooks do all project work. Your job is dispatch, supervision, and
    reporting back to the human.
-2. **One ticket = one worktree = one zmx session.** Keep tickets isolated so parallel work
+2. **One ticket = one worktree = one tmux session.** Keep tickets isolated so parallel work
    never collides.
 3. **Steer with short, single-line messages.** Anything long belongs in a file the
    line cook reads, not in a `send`.
@@ -71,11 +71,11 @@ is no installed binary to call.
 | `yeschef project add <git-url> [name]` | Register a project (bare clone + worktrees dir). |
 | `yeschef project list` | List registered projects. |
 | `yeschef refresh [<project>]` | Fetch latest remote refs into a project's bare clone (all projects if omitted), so the next `spawn --base origin/main` starts from the up-to-date tip. |
-| `yeschef spawn <project> <branch> [--base <ref>] [--agent <cmd>] [-p "<prompt>"]` | Create the worktree, open a zmx session, launch the agent. |
+| `yeschef spawn <project> <branch> [--base <ref>] [--agent <cmd>] [-p "<prompt>"]` | Create the worktree, open a tmux session, launch the agent. |
 | `yeschef send <project> <branch> <text...>` | Send one line of guidance to the agent (followed by Enter). |
 | `yeschef peek <project> <branch> [-n <lines>]` | Print the recent output of the agent's pane. |
 | `yeschef status` | Table of all tickets: agent, running/dead/gone, last pane line. |
-| `yeschef attach [<project> <branch>]` | Attach to the zmx session to watch (for the human). |
+| `yeschef attach [<project> <branch>]` | Attach to the tmux session to watch (for the human). |
 | `yeschef kill <project> <branch> [--rm-worktree]` | Stop the window; optionally delete the worktree. |
 | `yeschef cleanup [<project>] [--yes]` | Reap stale tickets whose branch is merged or gone from the remote **and** whose line cook reported `DONE` — kill the session, remove the worktree + branch, and deregister. Never reaps active work: a ticket still `NEW`/`IN_PROGRESS`/`BLOCKED` is kept even if its branch looks merged/gone (a freshly-spawned branch has no commits yet, so it classifies as merged). Skips unmerged work. Dry run unless `--yes`. |
 
@@ -112,7 +112,7 @@ For each piece of work the human gives you:
 
 ## Conventions
 
-- Branch names become zmx session names (`<project>-<sanitized-branch>`), so keep them
+- Branch names become tmux session names (`<project>-<sanitized-branch>`), so keep them
   short and descriptive (`fix-auth`, `new-api`).
 - `spawn` reuses an existing worktree if one is present, so killing without
   `--rm-worktree` lets you resume a branch later.

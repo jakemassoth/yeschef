@@ -3,10 +3,11 @@
 //! All tests are `#[ignore]` by default. Run with:
 //!   cargo test --test e2e -- --ignored --test-threads=1
 //!
-//! Requirements: `git` and `zmx` in PATH. No containers, no Nix, no macOS
-//! requirement — the head chef drives real git worktrees and a real zmx
-//! session. `--test-threads=1` keeps the shared `yeschef` zmx sessions sane
-//! across tests (each test uses a unique project name, so windows don't clash).
+//! Requirements: `git` and `tmux` in PATH. No containers, no Nix, no macOS
+//! requirement — the head chef drives real git worktrees and real tmux
+//! sessions on yeschef's private `-L yeschef` server. `--test-threads=1` keeps
+//! the shared `yeschef` sessions sane across tests (each test uses a unique
+//! project name, so windows don't clash).
 
 use std::path::Path;
 use std::process::Command;
@@ -96,44 +97,54 @@ fn unique_name() -> String {
     format!("t{pid:08x}{:04x}", nanos & 0xffff)
 }
 
-/// The flat zmx session id the backend uses for a ticket window:
+/// yeschef's private tmux socket (`tmux -L`), mirroring
+/// `backend::real::TMUX_SOCKET`. All helpers here talk to that server so they
+/// observe exactly the sessions the yeschef binary created.
+const TMUX_SOCKET: &str = "yeschef";
+
+/// A `tmux` command wired to yeschef's private server. Read/kill helpers don't
+/// need `-f` (the server is already running with its config from the binary's
+/// spawn), so only the socket is set.
+fn tmux(args: &[&str]) -> std::process::Output {
+    Command::new("tmux")
+        .args(["-L", TMUX_SOCKET])
+        .args(args)
+        .output()
+        .expect("failed to run tmux")
+}
+
+/// The flat tmux session id the backend uses for a ticket window:
 /// `<yeschef_session>-<window>`.
-fn zid(window: &str) -> String {
+fn sid(window: &str) -> String {
     format!("yeschef-{window}")
 }
 
-/// Kill a ticket's zmx session on drop (best-effort teardown).
+/// Kill a ticket's tmux session on drop (best-effort teardown).
 struct WindowCleanup(Vec<String>);
 
 impl Drop for WindowCleanup {
     fn drop(&mut self) {
         for window in &self.0 {
-            let _ = Command::new("zmx")
-                .args(["kill", &zid(window), "--force"])
+            let _ = Command::new("tmux")
+                .args(["-L", TMUX_SOCKET, "kill-session", "-t", &sid(window)])
                 .output();
         }
     }
 }
 
-/// Capture a window's scrollback via the real zmx.
+/// Capture a window's scrollback via the real tmux.
 fn capture(window: &str) -> String {
-    Command::new("zmx")
-        .args(["history", &zid(window)])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default()
+    let out = tmux(&["capture-pane", "-p", "-S", "-", "-t", &sid(window)]);
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 fn window_exists(window: &str) -> bool {
-    let id = zid(window);
-    Command::new("zmx")
-        .args(["ls", "--short"])
-        .output()
-        .is_ok_and(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .any(|l| l.trim() == id)
-        })
+    let id = sid(window);
+    let out = tmux(&["list-sessions", "-F", "#{session_name}"]);
+    out.status.success()
+        && String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .any(|l| l.trim() == id)
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +152,7 @@ fn window_exists(window: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires git + zmx; use `cargo test --test e2e -- --ignored`"]
+#[ignore = "requires git + tmux; use `cargo test --test e2e -- --ignored`"]
 fn init_creates_expected_layout() {
     let env = TestEnv::new();
 
@@ -157,7 +168,7 @@ fn init_creates_expected_layout() {
 }
 
 #[test]
-#[ignore = "requires git + zmx"]
+#[ignore = "requires git + tmux"]
 fn init_is_idempotent() {
     let env = TestEnv::new();
     env.cmd().arg("init").assert().success();
@@ -173,7 +184,7 @@ fn init_is_idempotent() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires git + zmx"]
+#[ignore = "requires git + tmux"]
 fn project_list_empty() {
     let env = TestEnv::new();
     env.init();
@@ -185,7 +196,7 @@ fn project_list_empty() {
 }
 
 #[test]
-#[ignore = "requires git + zmx"]
+#[ignore = "requires git + tmux"]
 fn project_add_registers_bare_clone() {
     let env = TestEnv::new();
     env.init();
@@ -228,7 +239,7 @@ fn git_out(dir: &Path, args: &[&str]) -> String {
 }
 
 #[test]
-#[ignore = "requires git + zmx"]
+#[ignore = "requires git + tmux"]
 fn project_add_makes_origin_main_resolve() {
     // The core fix: after `project add`, `origin/main` must resolve in the bare
     // clone so `spawn --base origin/main` and `git rebase origin/main` work.
@@ -258,7 +269,7 @@ fn project_add_makes_origin_main_resolve() {
 }
 
 #[test]
-#[ignore = "requires git + zmx"]
+#[ignore = "requires git + tmux"]
 fn refresh_repairs_clone_with_no_tracking_refspec() {
     // Migration path: a bare clone created the old way (no fetch refspec) has no
     // origin/* refs. `refresh` must repair the refspec and populate them.
@@ -302,7 +313,7 @@ fn refresh_repairs_clone_with_no_tracking_refspec() {
 }
 
 #[test]
-#[ignore = "requires git + zmx"]
+#[ignore = "requires git + tmux"]
 fn project_add_duplicate_name_rejected() {
     let env = TestEnv::new();
     env.init();
@@ -321,7 +332,7 @@ fn project_add_duplicate_name_rejected() {
 }
 
 #[test]
-#[ignore = "requires git + zmx"]
+#[ignore = "requires git + tmux"]
 fn project_add_invalid_name_rejected() {
     let env = TestEnv::new();
     env.init();
@@ -335,11 +346,11 @@ fn project_add_invalid_name_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// orchestration error tests (no zmx session required)
+// orchestration error tests (no tmux session required)
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires git + zmx"]
+#[ignore = "requires git + tmux"]
 fn spawn_unknown_project_gives_clear_error() {
     let env = TestEnv::new();
     env.init();
@@ -351,7 +362,7 @@ fn spawn_unknown_project_gives_clear_error() {
 }
 
 #[test]
-#[ignore = "requires git + zmx"]
+#[ignore = "requires git + tmux"]
 fn send_unknown_ticket_gives_clear_error() {
     let env = TestEnv::new();
     env.init();
@@ -373,7 +384,7 @@ fn send_unknown_ticket_gives_clear_error() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires git + zmx"]
+#[ignore = "requires git + tmux"]
 fn spawn_creates_worktree_and_live_window() {
     let env = TestEnv::new();
     env.init();
@@ -447,10 +458,10 @@ fn spawn_creates_worktree_and_live_window() {
         "prompt file should end with the verbatim user prompt after the rule; got:\n{written}"
     );
 
-    // zmx session is live.
+    // tmux session is live.
     assert!(
         window_exists(&window),
-        "zmx session for '{window}' should exist"
+        "tmux session for '{window}' should exist"
     );
 
     // Give the shell a moment to echo, then peek should show the marker and the
@@ -483,7 +494,7 @@ fn spawn_creates_worktree_and_live_window() {
 }
 
 #[test]
-#[ignore = "requires git + zmx"]
+#[ignore = "requires git + tmux"]
 fn send_reaches_the_pane() {
     let env = TestEnv::new();
     env.init();
@@ -497,9 +508,13 @@ fn send_reaches_the_pane() {
     let window = format!("{name}-demo");
     let _cleanup = WindowCleanup(vec![window.clone()]);
 
-    // A `cat` loop echoes whatever we send into the pane.
+    // `cat` reading stdin echoes whatever we send into the pane and stays
+    // alive (tmux destroys a session whose process exits). Wrapping it in
+    // `sh -c 'cat'` keeps cat argument-free — the read-this-file instruction
+    // lands in `$0` — so it reads stdin instead of treating the instruction as
+    // a filename and exiting.
     env.cmd()
-        .args(["spawn", &name, "demo", "--agent", "cat"])
+        .args(["spawn", &name, "demo", "--agent", "sh -c 'cat'"])
         .assert()
         .success();
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -518,7 +533,7 @@ fn send_reaches_the_pane() {
 }
 
 #[test]
-#[ignore = "requires git + zmx"]
+#[ignore = "requires git + tmux"]
 fn kill_removes_window_and_deregisters() {
     let env = TestEnv::new();
     env.init();
@@ -533,7 +548,9 @@ fn kill_removes_window_and_deregisters() {
     let _cleanup = WindowCleanup(vec![window.clone()]);
 
     env.cmd()
-        .args(["spawn", &name, "demo", "--agent", "sh -c", "-p", "sleep 30"])
+        // A genuinely long-lived agent so the session stays up for the check;
+        // the read-this-file instruction lands in `$0` and is ignored.
+        .args(["spawn", &name, "demo", "--agent", "sh -c 'sleep 30'"])
         .assert()
         .success();
     assert!(window_exists(&window), "window should exist after spawn");
@@ -569,7 +586,7 @@ fn kill_removes_window_and_deregisters() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires git + zmx"]
+#[ignore = "requires git + tmux"]
 fn cleanup_dry_run_reports_without_removing() {
     let env = TestEnv::new();
     env.init();
@@ -623,7 +640,7 @@ fn cleanup_dry_run_reports_without_removing() {
 }
 
 #[test]
-#[ignore = "requires git + zmx"]
+#[ignore = "requires git + tmux"]
 fn cleanup_yes_reaps_merged_ticket() {
     let env = TestEnv::new();
     env.init();
@@ -677,7 +694,7 @@ fn cleanup_yes_reaps_merged_ticket() {
 }
 
 #[test]
-#[ignore = "requires git + zmx"]
+#[ignore = "requires git + tmux"]
 fn cleanup_yes_keeps_active_ticket_even_when_merged() {
     // Regression guard: a freshly-spawned ticket has no commits, so its branch
     // classifies "merged" — but the cook is still working it (status stays at
@@ -732,7 +749,7 @@ fn cleanup_yes_keeps_active_ticket_even_when_merged() {
 }
 
 #[test]
-#[ignore = "requires git + zmx"]
+#[ignore = "requires git + tmux"]
 fn spawn_duplicate_window_rejected() {
     let env = TestEnv::new();
     env.init();
@@ -747,11 +764,15 @@ fn spawn_duplicate_window_rejected() {
     let _cleanup = WindowCleanup(vec![window]);
 
     env.cmd()
-        .args(["spawn", &name, "demo", "--agent", "sh -c", "-p", "sleep 30"])
+        // A genuinely long-lived agent so the session stays up for the check;
+        // the read-this-file instruction lands in `$0` and is ignored.
+        .args(["spawn", &name, "demo", "--agent", "sh -c 'sleep 30'"])
         .assert()
         .success();
     env.cmd()
-        .args(["spawn", &name, "demo", "--agent", "sh -c", "-p", "sleep 30"])
+        // A genuinely long-lived agent so the session stays up for the check;
+        // the read-this-file instruction lands in `$0` and is ignored.
+        .args(["spawn", &name, "demo", "--agent", "sh -c 'sleep 30'"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("already exists"));

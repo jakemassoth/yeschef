@@ -81,8 +81,8 @@ pub fn run_spawn(
     let worktree_path = config.worktree_dir(project, branch);
 
     // Refuse to clobber a ticket that's already running in a live window.
-    config.zmx.ensure_session(session)?;
-    if config.zmx.window_exists(session, &window)? {
+    config.tmux.ensure_session(session)?;
+    if config.tmux.window_exists(session, &window)? {
         bail!(
             "a window for '{project}/{branch}' already exists; use 'yeschef send/peek {project} {branch}' or 'yeschef kill {project} {branch}' first"
         );
@@ -129,7 +129,7 @@ pub fn run_spawn(
             .context("failed to unset extensions.relativeWorktrees on bare repo")?;
     }
 
-    // 2. Launch the agent in a fresh zmx session rooted at the worktree.
+    // 2. Launch the agent in a fresh tmux session rooted at the worktree.
     //
     // The prompt is never passed inline: a long prompt (a few paragraphs) blows
     // past the OS arg-length limit and the agent harness, treating the giant
@@ -154,9 +154,9 @@ pub fn run_spawn(
     );
     let command = format!("{agent} {}", shell_single_quote(&instruction));
     config
-        .zmx
+        .tmux
         .new_window(session, &window, &worktree_path, &command)
-        .with_context(|| format!("failed to create zmx session '{session}-{window}'"))?;
+        .with_context(|| format!("failed to create tmux session '{session}-{window}'"))?;
 
     // 3. Register the ticket.
     config
@@ -179,7 +179,7 @@ pub fn run_spawn(
 pub fn run_send(config: &Config, project: &str, branch: &str, text: &str) -> Result<()> {
     let ticket = require_ticket(config, project, branch)?;
     config
-        .zmx
+        .tmux
         .send_keys(yeschef_session(), &ticket.window, text)
         .with_context(|| format!("failed to send keys to '{project}/{branch}'"))?;
     Ok(())
@@ -192,7 +192,7 @@ pub fn run_send(config: &Config, project: &str, branch: &str, text: &str) -> Res
 pub fn run_peek(config: &Config, project: &str, branch: &str, lines: Option<usize>) -> Result<()> {
     let ticket = require_ticket(config, project, branch)?;
     let pane = config
-        .zmx
+        .tmux
         .capture_pane(
             yeschef_session(),
             &ticket.window,
@@ -218,7 +218,7 @@ pub fn run_status(config: &Config) -> Result<()> {
     }
 
     let session = yeschef_session();
-    let windows = config.zmx.list_windows(session).unwrap_or_default();
+    let windows = config.tmux.list_windows(session).unwrap_or_default();
 
     println!(
         "{:<28} {:<10} {:<12} {:<12} LAST LINE",
@@ -233,7 +233,7 @@ pub fn run_status(config: &Config) -> Result<()> {
         };
         let last_line = if matches!(state, "running") {
             config
-                .zmx
+                .tmux
                 .capture_pane(session, &ticket.window, Some(5))
                 .ok()
                 .and_then(|p| {
@@ -284,7 +284,7 @@ pub fn run_kill(config: &Config, project: &str, branch: &str, rm_worktree: bool)
     let session = yeschef_session();
 
     config
-        .zmx
+        .tmux
         .kill_window(session, &ticket.window)
         .with_context(|| format!("failed to kill window for '{project}/{branch}'"))?;
 
@@ -316,7 +316,7 @@ pub fn run_kill(config: &Config, project: &str, branch: &str, rm_worktree: bool)
 
 pub fn run_attach(config: &Config, project: Option<&str>, branch: Option<&str>) -> Result<()> {
     let session = yeschef_session();
-    if !config.zmx.session_exists(session)? {
+    if !config.tmux.session_exists(session)? {
         bail!(
             "no yeschef session yet; spawn a ticket first with 'yeschef spawn <project> <branch>'"
         );
@@ -328,7 +328,7 @@ pub fn run_attach(config: &Config, project: Option<&str>, branch: Option<&str>) 
     };
 
     config
-        .zmx
+        .tmux
         .attach(session, window.as_deref())
         .context("failed to attach to yeschef session")?;
     Ok(())
@@ -337,7 +337,7 @@ pub fn run_attach(config: &Config, project: Option<&str>, branch: Option<&str>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::mock::{MockGitBackend, MockZmxBackend};
+    use crate::backend::mock::{MockGitBackend, MockTmuxBackend};
     use crate::store::Store;
     use tempfile::TempDir;
 
@@ -347,12 +347,12 @@ mod tests {
     /// through them. Keep `_tmp` alive for the duration of the test.
     struct Harness {
         config: Config,
-        zmx: MockZmxBackend,
+        tmux: MockTmuxBackend,
         git: MockGitBackend,
         _tmp: TempDir,
     }
 
-    fn harness(zmx: MockZmxBackend) -> Harness {
+    fn harness(tmux: MockTmuxBackend) -> Harness {
         let tmp = TempDir::new().unwrap();
         let store = Store::open_in_memory().unwrap();
         store
@@ -363,11 +363,11 @@ mod tests {
             home: tmp.path().to_path_buf(),
             store,
             git: Box::new(git.clone()),
-            zmx: Box::new(zmx.clone()),
+            tmux: Box::new(tmux.clone()),
         };
         Harness {
             config,
-            zmx,
+            tmux,
             git,
             _tmp: tmp,
         }
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn spawn_creates_window_and_registers_ticket() {
-        let h = harness(MockZmxBackend::new());
+        let h = harness(MockTmuxBackend::new());
         run_spawn(
             &h.config,
             "proj",
@@ -404,7 +404,7 @@ mod tests {
 
         // The window launches the agent with a short "read this file"
         // instruction rather than the prompt inlined on the command line.
-        let calls = h.zmx.recorded_calls();
+        let calls = h.tmux.recorded_calls();
         assert!(
             calls
                 .iter()
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn spawn_writes_long_prompt_to_file_not_inline() {
-        let h = harness(MockZmxBackend::new());
+        let h = harness(MockTmuxBackend::new());
         // A multi-paragraph prompt that would overflow the arg-length limit if
         // passed inline (the ENAMETOOLONG bug this guards against).
         let long_prompt = "Refactor the widget subsystem.\n\n".repeat(500);
@@ -431,7 +431,7 @@ mod tests {
         )
         .unwrap();
 
-        let calls = h.zmx.recorded_calls();
+        let calls = h.tmux.recorded_calls();
         let launch = calls
             .iter()
             .find(|c| c.starts_with("new_window:yeschef:proj-feature-x:"))
@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn spawn_injects_status_protocol_even_without_prompt() {
-        let h = harness(MockZmxBackend::new());
+        let h = harness(MockTmuxBackend::new());
         run_spawn(&h.config, "proj", "feature/x", None, "claude", None).unwrap();
 
         // Even with no -p prompt, a brief file is written carrying the protocol,
@@ -486,7 +486,7 @@ mod tests {
         // The command is substituted with the real project/branch.
         assert!(written.contains("ticket proj feature/x status-set <STATUS>"));
 
-        let calls = h.zmx.recorded_calls();
+        let calls = h.tmux.recorded_calls();
         assert!(
             calls
                 .iter()
@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn ticket_status_set_persists_and_requires_ticket() {
-        let h = harness(MockZmxBackend::new());
+        let h = harness(MockTmuxBackend::new());
         run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap();
 
         run_ticket_status_set(&h.config, "proj", "x", TaskStatus::Blocked).unwrap();
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn spawn_refuses_duplicate_window() {
-        let h = harness(MockZmxBackend::new());
+        let h = harness(MockTmuxBackend::new());
         run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap();
         let err = run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap_err();
         assert!(err.to_string().contains("already exists"), "{err}");
@@ -520,17 +520,17 @@ mod tests {
 
     #[test]
     fn spawn_unknown_project_errors() {
-        let h = harness(MockZmxBackend::new());
+        let h = harness(MockTmuxBackend::new());
         let err = run_spawn(&h.config, "nope", "x", None, "claude", None).unwrap_err();
         assert!(err.to_string().contains("not found"), "{err}");
     }
 
     #[test]
     fn send_targets_the_ticket_window() {
-        let h = harness(MockZmxBackend::new());
+        let h = harness(MockTmuxBackend::new());
         run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap();
         run_send(&h.config, "proj", "x", "run tests").unwrap();
-        let calls = h.zmx.recorded_calls();
+        let calls = h.tmux.recorded_calls();
         assert!(
             calls.contains(&"send_keys:yeschef:proj-x:run tests".to_string()),
             "calls: {calls:?}"
@@ -539,18 +539,18 @@ mod tests {
 
     #[test]
     fn send_unknown_ticket_errors() {
-        let h = harness(MockZmxBackend::new());
+        let h = harness(MockTmuxBackend::new());
         let err = run_send(&h.config, "proj", "ghost", "hi").unwrap_err();
         assert!(err.to_string().contains("no ticket"), "{err}");
     }
 
     #[test]
     fn peek_returns_pane_content() {
-        let zmx = MockZmxBackend::new().with_pane("yeschef", "proj-x", "hello from agent\n");
-        let h = harness(zmx);
+        let tmux = MockTmuxBackend::new().with_pane("yeschef", "proj-x", "hello from agent\n");
+        let h = harness(tmux);
         run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap();
         run_peek(&h.config, "proj", "x", Some(10)).unwrap();
-        let calls = h.zmx.recorded_calls();
+        let calls = h.tmux.recorded_calls();
         assert!(
             calls.iter().any(|c| c == "capture_pane:yeschef:proj-x:10"),
             "calls: {calls:?}"
@@ -559,12 +559,12 @@ mod tests {
 
     #[test]
     fn kill_removes_window_and_ticket() {
-        let h = harness(MockZmxBackend::new());
+        let h = harness(MockTmuxBackend::new());
         run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap();
         run_kill(&h.config, "proj", "x", false).unwrap();
         assert!(h.config.store.lookup_ticket("proj", "x").unwrap().is_none());
         assert!(h
-            .zmx
+            .tmux
             .recorded_calls()
             .contains(&"kill_window:yeschef:proj-x".to_string()));
         // Without --rm-worktree, the worktree is not removed.
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn kill_with_rm_worktree_removes_worktree() {
-        let h = harness(MockZmxBackend::new());
+        let h = harness(MockTmuxBackend::new());
         run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap();
         run_kill(&h.config, "proj", "x", true).unwrap();
         assert!(h

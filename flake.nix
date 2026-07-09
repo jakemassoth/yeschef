@@ -12,10 +12,6 @@
       url = "github:nix-community/naersk";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # zmx — session attach/detach for the terminal. Its build is tightly
-    # coupled to zig2nix's pinned nixpkgs + Apple SDK, so we deliberately do
-    # NOT make it follow our nixpkgs; we just consume its built package.
-    zmx-flake.url = "github:thrawny/zmx-flake";
   };
 
   outputs =
@@ -25,15 +21,16 @@
       flake-utils,
       rust-overlay,
       naersk,
-      zmx-flake,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
-        # The zmx binary the backend shells out to at runtime.
-        zmx = zmx-flake.packages.${system}.default;
+        # The tmux binary the backend shells out to at runtime. Plain nixpkgs
+        # tmux — yeschef drives it on a private `-L` socket with its own `-f`
+        # config, so no packaging quirks (unlike the old zmx dependency).
+        tmux = pkgs.tmux;
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [
             "rust-src"
@@ -45,20 +42,20 @@
           rustc = rustToolchain;
         };
         # The plain, unwrapped yeschef binary. `packages.default` wraps this to
-        # bake zmx onto PATH (see below); everything else builds from source.
+        # bake tmux onto PATH (see below); everything else builds from source.
         yeschef-unwrapped = naersk'.buildPackage { src = ./.; };
       in
       {
         packages = {
           # nix build  /  nix run . -- <args>
           #
-          # The backend shells out to bare `zmx` (Command::new("zmx")), so the
-          # shipped binary must find zmx at runtime WITHOUT the user putting it
+          # The backend shells out to bare `tmux` (Command::new("tmux")), so the
+          # shipped binary must find tmux at runtime WITHOUT the user putting it
           # on their PATH. We build the plain binary with naersk, then wrap it so
-          # the zmx package's bin dir is baked onto PATH. `--suffix` (not
-          # `--prefix`): if a user has explicitly installed their own zmx, that
+          # the tmux package's bin dir is baked onto PATH. `--suffix` (not
+          # `--prefix`): if a user has explicitly installed their own tmux, that
           # copy on the ambient PATH wins; ours is only the fallback for when
-          # zmx is absent. We wrap in a separate symlinkJoin derivation rather
+          # tmux is absent. We wrap in a separate symlinkJoin derivation rather
           # than via naersk's postInstall because naersk replays the install
           # phase during its deps-only build too, so a postInstall wrapProgram
           # would run twice and against a dummy src — wrapping outside naersk
@@ -68,7 +65,7 @@
             paths = [ yeschef-unwrapped ];
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postBuild = ''
-              wrapProgram $out/bin/yeschef --suffix PATH : ${zmx}/bin
+              wrapProgram $out/bin/yeschef --suffix PATH : ${tmux}/bin
             '';
           };
 
@@ -94,9 +91,9 @@
         };
 
         # nix run .#e2e [-- <test-name>]  — runs the e2e suite. It drives the
-        # orchestrator against real git worktrees and a real zmx session, so it
-        # needs `git` and `zmx` on PATH (no containers, no macOS requirement).
-        # `zmx` is supplied by the zmx-flake package and prepended to PATH below.
+        # orchestrator against real git worktrees and real tmux sessions, so it
+        # needs `git` and `tmux` on PATH (no containers, no macOS requirement).
+        # `tmux` comes from nixpkgs and is prepended to PATH below.
         # nix run . -- <args>  — run THIS checkout's yeschef. The orchestrator
         # uses this so each branch runs its own build.
         apps.default = {
@@ -111,13 +108,13 @@
           # self-contained: the pinned toolchain provides cargo AND the `rustc`
           # it shells out to (resolving rustc from an ambient rustup shim on a
           # clean CI runner corrupts the toolchain under concurrent builds), and
-          # git + zmx are guaranteed present without an existence check.
+          # git + tmux are guaranteed present without an existence check.
           program = "${
             pkgs.writeShellApplication {
               name = "yeschef-e2e";
               runtimeInputs = [
                 rustToolchain
-                zmx
+                tmux
                 pkgs.git
               ];
               text = ''
@@ -135,14 +132,15 @@
         # NOT covered here: the e2e suite. It is intentionally kept out of
         # `nix flake check` and run as a separate `nix run .#e2e` CI step. Two
         # reasons:
-        #   1. e2e drives a REAL zmx session and REAL git worktrees, sharing the
-        #      global `yeschef` zmx session namespace and spawning detached zmx
-        #      daemons. That is an impure integration test, not a hermetic build.
+        #   1. e2e drives REAL tmux sessions and REAL git worktrees, sharing the
+        #      global `yeschef` tmux server (a private `-L` socket) and spawning
+        #      detached sessions. That is an impure integration test, not a
+        #      hermetic build.
         #   2. naersk's test mode can't cleanly run the `#[ignore]`d e2e tests:
         #      its deps-only build phase replays the same `cargo test` options
         #      against a dummy src that has no `e2e` target and fails. Forcing it
         #      would mean a bespoke build derivation duplicating naersk's vendoring.
-        # zmx itself does run in the sandbox, but the above make a separate
+        # tmux would run fine in the sandbox, but the above make a separate
         # un-sandboxed `nix run .#e2e` step the right home for the suite.
         checks = {
           # rustfmt is the formatter; `cargo fmt --check` IS the formatting check.
@@ -180,7 +178,7 @@
           buildInputs = [
             rustToolchain
             pkgs.cargo-watch
-            zmx
+            tmux
             # vhs records the terminal headlessly so line cooks can attach
             # demo recordings to PRs. The nixpkgs derivation wraps its
             # `ttyd` + `ffmpeg` runtime deps, so the binary is self-contained.
