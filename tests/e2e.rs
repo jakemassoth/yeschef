@@ -584,12 +584,18 @@ fn cleanup_dry_run_reports_without_removing() {
     let _cleanup = WindowCleanup(vec![window.clone()]);
 
     // A branch spawned from `main` points at main's tip, so it is an ancestor
-    // of origin/main — classified "merged" and thus a reap candidate.
+    // of origin/main — classified "merged". That alone is no longer enough to
+    // reap: cleanup also requires the cook to be inactive. Report DONE so the
+    // ticket becomes a genuine reap candidate for the dry run to spare.
     env.cmd()
         .args(["spawn", &name, "demo", "--agent", "sh -c 'sleep 30'"])
         .assert()
         .success();
     assert!(window_exists(&window), "window should exist after spawn");
+    env.cmd()
+        .args(["ticket", &name, "demo", "status-set", "DONE"])
+        .assert()
+        .success();
 
     // Default cleanup (no --yes) is a dry run: it reports the candidate but
     // removes nothing.
@@ -637,6 +643,13 @@ fn cleanup_yes_reaps_merged_ticket() {
         .success();
     assert!(window_exists(&window), "window should exist after spawn");
 
+    // The branch is "merged" (points at main's tip), but reaping also requires
+    // the cook to be inactive. Report DONE so both gates agree.
+    env.cmd()
+        .args(["ticket", &name, "demo", "status-set", "DONE"])
+        .assert()
+        .success();
+
     env.cmd()
         .args(["cleanup", &name, "--yes"])
         .assert()
@@ -661,6 +674,61 @@ fn cleanup_yes_reaps_merged_ticket() {
         .assert()
         .success()
         .stdout(predicate::str::contains(format!("{name}/demo")).not());
+}
+
+#[test]
+#[ignore = "requires git + zmx"]
+fn cleanup_yes_keeps_active_ticket_even_when_merged() {
+    // Regression guard: a freshly-spawned ticket has no commits, so its branch
+    // classifies "merged" — but the cook is still working it (status stays at
+    // the NEW default). `cleanup --yes` must NOT reap live work.
+    let env = TestEnv::new();
+    env.init();
+    let repo = SampleRepo::new();
+    let name = unique_name();
+    env.cmd()
+        .args(["project", "add", &repo.url(), &name])
+        .assert()
+        .success();
+
+    let window = format!("{name}-demo");
+    let _cleanup = WindowCleanup(vec![window.clone()]);
+
+    env.cmd()
+        .args(["spawn", &name, "demo", "--agent", "sh -c 'sleep 30'"])
+        .assert()
+        .success();
+    assert!(window_exists(&window), "window should exist after spawn");
+
+    // Even with --yes, the merged-but-active ticket is kept, and the report
+    // says why. (The summary line always contains the word "reaped" — e.g.
+    // "0 reaped, 1 kept" — so we assert on the absence of the per-ticket reap
+    // line for this branch specifically.)
+    env.cmd()
+        .args(["cleanup", &name, "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("keep   {name}/demo")))
+        .stdout(predicate::str::contains("active"))
+        .stdout(predicate::str::contains(format!("reaped {name}/demo")).not());
+
+    // Window, worktree, and registry entry all survive.
+    assert!(
+        window_exists(&window),
+        "active ticket's window must survive"
+    );
+    let worktree = env
+        .home_path()
+        .join("projects")
+        .join(&name)
+        .join("worktrees")
+        .join("demo");
+    assert!(worktree.is_dir(), "active ticket's worktree must survive");
+    env.cmd()
+        .args(["status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("{name}/demo")));
 }
 
 #[test]

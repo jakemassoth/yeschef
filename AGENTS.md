@@ -77,7 +77,7 @@ is no installed binary to call.
 | `yeschef status` | Table of all tickets: agent, running/dead/gone, last pane line. |
 | `yeschef attach [<project> <branch>]` | Attach to the zmx session to watch (for the human). |
 | `yeschef kill <project> <branch> [--rm-worktree]` | Stop the window; optionally delete the worktree. |
-| `yeschef cleanup [<project>] [--yes]` | Reap stale tickets whose branch is merged or gone from the remote — kill the session, remove the worktree + branch, and deregister. Skips unmerged work. Dry run unless `--yes`. |
+| `yeschef cleanup [<project>] [--yes]` | Reap stale tickets whose branch is merged or gone from the remote **and** whose line cook reported `DONE` — kill the session, remove the worktree + branch, and deregister. Never reaps active work: a ticket still `NEW`/`IN_PROGRESS`/`BLOCKED` is kept even if its branch looks merged/gone (a freshly-spawned branch has no commits yet, so it classifies as merged). Skips unmerged work. Dry run unless `--yes`. |
 
 `--agent` defaults to `claude`; it is just a command string, so any harness works
 (`--agent codex`, `--agent 'claude --model …'`, `--agent aider`, …).

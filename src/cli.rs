@@ -95,7 +95,9 @@ pub enum Commands {
         rm_worktree: bool,
     },
 
-    /// Reap stale tickets whose branches are merged or gone from the remote
+    /// Reap stale tickets whose branch is merged/gone from the remote AND whose
+    /// cook is no longer active (status `DONE`). Active tickets
+    /// (`NEW`/`IN_PROGRESS`/`BLOCKED`) are always kept, even if merged/gone.
     Cleanup {
         /// Project to clean (omit to clean every registered project)
         project: Option<String>,
