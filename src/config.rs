@@ -86,9 +86,10 @@ pub fn resolve_home() -> Result<PathBuf> {
 }
 
 /// Resolve the yeschef **source checkout** directory — the working directory
-/// for the head-chef Claude Code session the TUI pins (see `commands::tui`).
-/// Defaults to the canonical `~/yeschef/yeschef-src` (see CLAUDE.md), and is
-/// overridable via `YESCHEF_SRC` for non-standard layouts and tests.
+/// for the pinned head-chef session at window 0 of the brigade (see
+/// `commands::orchestrate::run_tui`). Defaults to the canonical
+/// `~/yeschef/yeschef-src` (see CLAUDE.md), and is overridable via `YESCHEF_SRC`
+/// for non-standard layouts and tests.
 ///
 /// Deliberately *not* `env!("CARGO_MANIFEST_DIR")`: the shipped binary is
 /// commonly built via nix, so the compile-time manifest path points into the
@@ -100,6 +101,14 @@ pub fn resolve_src_dir() -> Result<PathBuf> {
     }
     let home = dirs::home_dir().context("could not determine home directory")?;
     Ok(home.join("yeschef").join("yeschef-src"))
+}
+
+/// The command the pinned head chef (window 0 of the brigade session) runs.
+/// Defaults to `claude`; overridable via `YESCHEF_HEADCHEF_CMD` for a different
+/// harness (`codex`, `claude --model …`, …) or for tests, which point it at a
+/// long-lived stand-in so no real agent is required.
+pub fn resolve_headchef_command() -> String {
+    std::env::var("YESCHEF_HEADCHEF_CMD").unwrap_or_else(|_| "claude".to_string())
 }
 
 /// Write yeschef's own tmux config to `<home>/tmux.conf` and return its path.

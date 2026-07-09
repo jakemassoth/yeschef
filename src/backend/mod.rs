@@ -63,56 +63,47 @@ pub struct WindowInfo {
 
 /// Trait abstracting `tmux` terminal session operations.
 ///
-/// The head chef models tickets as windows under a single `yeschef` brigade
-/// (see `names::yeschef_session`). Each ticket window maps onto its own
-/// standalone tmux session named `yeschef-<window>` (see `backend::real`), so
-/// tickets are fully isolated — independent lifecycle, independent detach —
-/// which is the point of the per-ticket session model. All sessions live on a
-/// private tmux server (a dedicated `-L` socket) loaded with yeschef's own
-/// config, so they never touch the user's tmux server or `~/.tmux.conf`. The
-/// head chef drives windows via `send_keys`/`capture_pane` without being
-/// attached; the human attaches separately to watch.
+/// The whole brigade lives in **one** tmux session (`names::yeschef_session`):
+/// the pinned head chef at window 0 (`names::headchef_window`) and one window
+/// per line cook, each named `<project>-<branch>`. A ticket "window" therefore
+/// maps onto a real tmux window addressed as `<session>:<window>` (see
+/// `backend::real`) — which is exactly what lets `tmux attach` show every cook
+/// together in a native tab bar (the yeschef TUI). The session runs on a private
+/// tmux server (a dedicated `-L` socket) loaded with yeschef's own config, so it
+/// never touches the user's tmux server or `~/.tmux.conf`. The head chef drives
+/// windows via `send_keys`/`capture_pane` without being attached; the human
+/// attaches to watch and to talk to the head chef.
 pub trait TmuxBackend: Send + Sync {
+    /// Whether the brigade session itself exists.
     fn session_exists(&self, session: &str) -> Result<bool>;
-    /// Create the session (detached) if it does not already exist.
-    fn ensure_session(&self, session: &str) -> Result<()>;
-    /// Create a new window running `command` with working directory `cwd`.
+    /// Ensure the brigade session exists. If absent, create it (detached) with
+    /// window 0 named `head_window`, running `head_command` in `head_cwd` — the
+    /// pinned head chef. Idempotent: an existing session is left untouched
+    /// (the head chef is never restarted or duplicated).
+    fn ensure_session(
+        &self,
+        session: &str,
+        head_window: &str,
+        head_cwd: &Path,
+        head_command: &str,
+    ) -> Result<()>;
+    /// Create a new window in the session running `command` in `cwd`. The
+    /// session must already exist (see `ensure_session`).
     fn new_window(&self, session: &str, window: &str, cwd: &Path, command: &str) -> Result<()>;
     fn window_exists(&self, session: &str, window: &str) -> Result<bool>;
     /// Send a single line of text followed by Enter into a window.
     fn send_keys(&self, session: &str, window: &str, text: &str) -> Result<()>;
     /// Capture the visible pane of a window. `lines` limits to the last N lines.
     fn capture_pane(&self, session: &str, window: &str, lines: Option<usize>) -> Result<String>;
-    /// Capture a window's full scrollback as a VT/ANSI byte stream (colours
-    /// and attributes preserved as SGR escapes) rather than de-styled text —
-    /// suitable for replaying through a real terminal-emulation parser. Line
-    /// separators are normalized to CRLF so the parser anchors each row at
-    /// column 0 (tmux emits bare LF, which a VT parser reads as a line-feed
-    /// only, staircasing the output). Returned whole, untrimmed.
-    fn capture_pane_styled(&self, session: &str, window: &str) -> Result<String>;
+    /// Set the per-window `@status` user option that yeschef's `tmux.conf`
+    /// renders as a colour-coded tab in the status line. Called on every
+    /// `ticket ... status-set` so the brigade tab bar reflects a cook's
+    /// self-reported status live, with no polling and no rendering on our side.
+    fn set_window_status(&self, session: &str, window: &str, status: &str) -> Result<()>;
+    /// List every window in the session (head chef included). Callers match the
+    /// names against the ticket registry to build the brigade view.
     fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>>;
     fn kill_window(&self, session: &str, window: &str) -> Result<()>;
-    /// Attach to the session; if `window` is given, select it first.
+    /// Attach to the session; if `window` is given, select it on attach.
     fn attach(&self, session: &str, window: Option<&str>) -> Result<()>;
-
-    // ---- Bare-session (raw id) operations --------------------------------
-    //
-    // The methods above address a ticket window and go through the brigade's
-    // `yeschef-<window>` id mapping. The `*_raw` methods below target a
-    // standalone tmux session by its exact id, with no namespacing — used for
-    // the TUI's pinned head-chef session (`names::headchef_session`), which is
-    // a bare `headchef` session running Claude Code rather than a brigade
-    // ticket. See `commands::tui`.
-
-    /// Ensure a bare tmux session with the exact id `id` exists, launching
-    /// `command` in `cwd` if it is absent. Idempotent: an already-running
-    /// session is left untouched (never restarted or duplicated).
-    fn ensure_raw_session(&self, id: &str, cwd: &Path, command: &str) -> Result<()>;
-    /// Capture a bare session's full scrollback as a VT/ANSI byte stream, like
-    /// [`capture_pane_styled`](Self::capture_pane_styled) but addressing the
-    /// session by its raw id (line separators likewise normalized to CRLF).
-    fn capture_raw_styled(&self, id: &str) -> Result<String>;
-    /// Attach to a bare session by its raw id, like [`attach`](Self::attach)
-    /// but without the brigade-window namespacing.
-    fn attach_raw(&self, id: &str) -> Result<()>;
 }

@@ -143,9 +143,9 @@ pub struct MockTmuxBackend {
     pub windows: Arc<Mutex<HashMap<String, Vec<WindowInfo>>>>,
     /// Canned pane content keyed by "`session:window`".
     pub pane_contents: Arc<Mutex<HashMap<String, String>>>,
-    /// Canned VT-styled pane content (see `capture_pane_styled`), keyed by
+    /// Per-window `@status` values set via `set_window_status`, keyed by
     /// "`session:window`".
-    pub styled_pane_contents: Arc<Mutex<HashMap<String, String>>>,
+    pub window_statuses: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl MockTmuxBackend {
@@ -165,22 +165,13 @@ impl MockTmuxBackend {
         self
     }
 
-    pub fn with_styled_pane(self, session: &str, window: &str, content: &str) -> Self {
-        self.styled_pane_contents
+    /// The `@status` last set on a window via `set_window_status`, if any.
+    pub fn window_status(&self, session: &str, window: &str) -> Option<String> {
+        self.window_statuses
             .lock()
             .unwrap()
-            .insert(format!("{session}:{window}"), content.to_string());
-        self
-    }
-
-    /// Pre-seed the VT-styled content a bare session reports from
-    /// `capture_raw_styled`, keyed by its raw id (no `session:window`).
-    pub fn with_raw_styled_pane(self, id: &str, content: &str) -> Self {
-        self.styled_pane_contents
-            .lock()
-            .unwrap()
-            .insert(id.to_string(), content.to_string());
-        self
+            .get(&format!("{session}:{window}"))
+            .cloned()
     }
 
     fn record(&self, call: String) {
@@ -198,8 +189,22 @@ impl TmuxBackend for MockTmuxBackend {
             .contains(&session.to_string()))
     }
 
-    fn ensure_session(&self, session: &str) -> Result<()> {
-        self.record(format!("ensure_session:{session}"));
+    fn ensure_session(
+        &self,
+        session: &str,
+        head_window: &str,
+        head_cwd: &Path,
+        head_command: &str,
+    ) -> Result<()> {
+        self.record(format!(
+            "ensure_session:{}:{}:{}:{}",
+            session,
+            head_window,
+            head_cwd.display(),
+            head_command
+        ));
+        // Idempotent, mirroring the real backend: only create the session (and
+        // its head chef window 0) when it's absent.
         let mut sessions = self.existing_sessions.lock().unwrap();
         if !sessions.contains(&session.to_string()) {
             sessions.push(session.to_string());
@@ -207,7 +212,12 @@ impl TmuxBackend for MockTmuxBackend {
                 .lock()
                 .unwrap()
                 .entry(session.to_string())
-                .or_default();
+                .or_default()
+                .push(WindowInfo {
+                    name: head_window.to_string(),
+                    active: true,
+                    dead: false,
+                });
         }
         Ok(())
     }
@@ -262,15 +272,13 @@ impl TmuxBackend for MockTmuxBackend {
             .unwrap_or_default())
     }
 
-    fn capture_pane_styled(&self, session: &str, window: &str) -> Result<String> {
-        self.record(format!("capture_pane_styled:{session}:{window}"));
-        Ok(self
-            .styled_pane_contents
+    fn set_window_status(&self, session: &str, window: &str, status: &str) -> Result<()> {
+        self.record(format!("set_window_status:{session}:{window}:{status}"));
+        self.window_statuses
             .lock()
             .unwrap()
-            .get(&format!("{session}:{window}"))
-            .cloned()
-            .unwrap_or_default())
+            .insert(format!("{session}:{window}"), status.to_string());
+        Ok(())
     }
 
     fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>> {
@@ -294,38 +302,6 @@ impl TmuxBackend for MockTmuxBackend {
 
     fn attach(&self, session: &str, window: Option<&str>) -> Result<()> {
         self.record(format!("attach:{session}:{}", window.unwrap_or("-")));
-        Ok(())
-    }
-
-    fn ensure_raw_session(&self, id: &str, cwd: &Path, command: &str) -> Result<()> {
-        self.record(format!(
-            "ensure_raw_session:{}:{}:{}",
-            id,
-            cwd.display(),
-            command
-        ));
-        // Idempotent, mirroring the real backend: only register the bare
-        // session when it's absent, so a second call is a no-op.
-        let mut sessions = self.existing_sessions.lock().unwrap();
-        if !sessions.contains(&id.to_string()) {
-            sessions.push(id.to_string());
-        }
-        Ok(())
-    }
-
-    fn capture_raw_styled(&self, id: &str) -> Result<String> {
-        self.record(format!("capture_raw_styled:{id}"));
-        Ok(self
-            .styled_pane_contents
-            .lock()
-            .unwrap()
-            .get(id)
-            .cloned()
-            .unwrap_or_default())
-    }
-
-    fn attach_raw(&self, id: &str) -> Result<()> {
-        self.record(format!("attach_raw:{id}"));
         Ok(())
     }
 }

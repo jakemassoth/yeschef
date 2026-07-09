@@ -3,10 +3,12 @@
 Orchestrate multiple coding agents in parallel across git worktrees, using tmux.
 
 yeschef lets **one** agent session (the head chef) dispatch and supervise a brigade of
-agents, each working on its own branch in its own git worktree inside its own tmux
-session. You talk to the head chef; it spawns line cooks, steers them, reads their
-output, and reports back. It is **agent-agnostic** — a line cook is just a command launched
-in a tmux session (`claude`, `codex`, `aider`, …), so nothing is tied to a particular vendor.
+agents, each working on its own branch in its own git worktree inside its own window of a
+shared `yeschef` tmux session. You talk to the head chef; it spawns line cooks, steers
+them, reads their output, and reports back. It is **agent-agnostic** — a line cook is just a
+command launched in a tmux window (`claude`, `codex`, `aider`, …), so nothing is tied to a
+particular vendor. `yeschef attach` gives the human a live, colour-coded tab bar of the
+whole brigade — tmux's own status line, one tab per cook.
 
 > Inspired by [firstmate](https://github.com/kunchenguid/firstmate). Where firstmate is
 > bash scripts + an `AGENTS.md`, yeschef is a single Rust CLI that *is* the toolbelt, plus
@@ -26,12 +28,13 @@ yeschef init                                  # ~/yeschef + AGENTS.md
 yeschef project add <git-url> [name]          # bare clone + worktrees dir
 yeschef refresh [<project>]                   # git fetch --prune (all projects if omitted)
 
-# dispatch a line cook: worktree + tmux session + agent
+# dispatch a line cook: worktree + tmux window + agent
 yeschef spawn <project> <branch> -p "Implement X and summarize what changed"
 
 yeschef status                                # who's running / dead / gone
 yeschef peek  <project> <branch>              # read an agent's pane
 yeschef send  <project> <branch> "use the helper in utils.rs"   # one-line steer
+yeschef tui                                   # attach to the brigade tab bar (native tmux UI)
 yeschef attach [<project> <branch>]           # watch the brigade live
 yeschef kill  <project> <branch> --rm-worktree
 yeschef cleanup [<project>] [--yes]           # reap merged/gone + DONE tickets (dry run unless --yes)

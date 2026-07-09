@@ -10,7 +10,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use cli::{Cli, Commands, ProjectCommands, TicketCommands};
-use commands::{cleanup, orchestrate, project, tui};
+use commands::{cleanup, orchestrate, project};
 use config::Config;
 
 fn main() {
@@ -90,7 +90,7 @@ fn run(cli: Cli) -> Result<()> {
             lines,
         } => orchestrate::run_peek(&config, &project, &branch, lines)?,
         Commands::Status => orchestrate::run_status(&config)?,
-        Commands::Tui => tui::run_tui(&config)?,
+        Commands::Tui => orchestrate::run_tui(&config)?,
         Commands::Attach { project, branch } => {
             orchestrate::run_attach(&config, project.as_deref(), branch.as_deref())?;
         }

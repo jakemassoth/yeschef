@@ -80,6 +80,12 @@ impl TestEnv {
         // littering the shared `/tmp/tmux-<uid>/` tree.
         cmd.env("YESCHEF_TMUX_SOCKET", &self.socket);
         cmd.env("TMUX_TMPDIR", self.tmp.path());
+        // The brigade session pins a head chef at window 0. Point it at a
+        // long-lived stand-in (not the real `claude`, absent in CI) rooted in a
+        // directory that exists, so ensuring the session never fast-fails and
+        // destroys it out from under the cook window we're about to add.
+        cmd.env("YESCHEF_SRC", &self.home);
+        cmd.env("YESCHEF_HEADCHEF_CMD", "sh -c 'exec sleep 300'");
         cmd
     }
 
@@ -102,17 +108,17 @@ impl TestEnv {
 
     /// Capture a window's scrollback via this env's tmux server.
     fn capture(&self, window: &str) -> String {
-        let out = self.tmux(&["capture-pane", "-p", "-S", "-", "-t", &sid(window)]);
+        let out = self.tmux(&["capture-pane", "-p", "-S", "-", "-t", &wtarget(window)]);
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
+    /// Whether a ticket window exists in the brigade session.
     fn window_exists(&self, window: &str) -> bool {
-        let id = sid(window);
-        let out = self.tmux(&["list-sessions", "-F", "#{session_name}"]);
+        let out = self.tmux(&["list-windows", "-t", "yeschef", "-F", "#{window_name}"]);
         out.status.success()
             && String::from_utf8_lossy(&out.stdout)
                 .lines()
-                .any(|l| l.trim() == id)
+                .any(|l| l.trim() == window)
     }
 }
 
@@ -204,10 +210,10 @@ fn unique_socket() -> String {
     format!("yeschef-test-{pid:08x}-{nanos:x}-{seq:x}")
 }
 
-/// The flat tmux session id the backend uses for a ticket window:
-/// `<yeschef_session>-<window>`.
-fn sid(window: &str) -> String {
-    format!("yeschef-{window}")
+/// The tmux target for a ticket window: a real window inside the single
+/// `yeschef` brigade session, addressed as `yeschef:<window>`.
+fn wtarget(window: &str) -> String {
+    format!("yeschef:{window}")
 }
 
 // ---------------------------------------------------------------------------
