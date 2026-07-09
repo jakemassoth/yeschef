@@ -11,14 +11,14 @@
 //! passively previews the selected line cook's session, colours and all, via
 //! a real VT100 parser ([`vt100`] + [`tui_term`]) rather than treating the
 //! captured scrollback as plain wrappable text. Pressing `Enter` hands the
-//! *real* terminal to `zmx attach` for full-fidelity, full-keyboard
+//! *real* terminal to `tmux attach` for full-fidelity, full-keyboard
 //! interaction with that session — see [`focus_session`] for why that's the
-//! right call given what zmx exposes. Leaving focus is zmx's own detach
-//! (`Ctrl+\`), which returns here automatically.
+//! right call given what tmux exposes. Leaving focus is tmux's own detach
+//! (`Ctrl+b d`), which returns here automatically.
 //!
 //! ## The head chef
 //!
-//! Above the brigade sits a pinned **head chef** entry: a bare `headchef` zmx
+//! Above the brigade sits a pinned **head chef** entry: a bare `headchef` tmux
 //! session (see [`headchef_session`]) running Claude Code in the yeschef source
 //! checkout, ensured on launch by [`ensure_headchef`]. It's the top of the
 //! navigable list (reachable with `k`/`g`, or jumped to directly with `C`) and
@@ -261,7 +261,7 @@ impl App {
 fn load_brigade(config: &Config) -> Vec<CookRow> {
     let tickets = config.store.list_tickets().unwrap_or_default();
     let windows = config
-        .zmx
+        .tmux
         .list_windows(yeschef_session())
         .unwrap_or_default();
     tickets
@@ -289,13 +289,13 @@ fn load_brigade(config: &Config) -> Vec<CookRow> {
 fn recapture(config: &Config, app: &mut App) {
     let pane = if app.headchef_selected() {
         config
-            .zmx
+            .tmux
             .capture_raw_styled(headchef_session())
             .unwrap_or_default()
     } else {
         match app.selected_window() {
             Some(window) => config
-                .zmx
+                .tmux
                 .capture_pane_styled(yeschef_session(), window)
                 .unwrap_or_default(),
             None => String::new(),
@@ -311,14 +311,14 @@ fn refresh(config: &Config, app: &mut App) {
 }
 
 /// Ensure the pinned head-chef Claude Code session exists, launching `claude`
-/// in `src_dir` (the yeschef source checkout) if the bare `headchef` zmx
+/// in `src_dir` (the yeschef source checkout) if the bare `headchef` tmux
 /// session is absent. Idempotent: an existing session is left running
-/// untouched — never restarted or duplicated. Best-effort: a `zmx run` failure
-/// is swallowed so the TUI still opens (the head-chef pane just previews empty)
-/// rather than blocking the brigade view on the head chef.
+/// untouched — never restarted or duplicated. Best-effort: a `tmux` launch
+/// failure is swallowed so the TUI still opens (the head-chef pane just
+/// previews empty) rather than blocking the brigade view on the head chef.
 fn ensure_headchef(config: &Config, src_dir: &Path) {
     let _ = config
-        .zmx
+        .tmux
         .ensure_raw_session(headchef_session(), src_dir, "claude");
 }
 
@@ -374,7 +374,7 @@ fn run_loop(config: &Config, terminal: &mut Terminal<CrosstermBackend<Stdout>>) 
                         if app.headchef_selected() {
                             let _ = focus_headchef(config, terminal);
                         } else {
-                            // Gone means the zmx session no longer exists —
+                            // Gone means the tmux session no longer exists —
                             // nothing to attach to. Dead (foreground process
                             // exited but the session lingers) still has a live
                             // shell worth visiting.
@@ -401,23 +401,24 @@ fn run_loop(config: &Config, terminal: &mut Terminal<CrosstermBackend<Stdout>>) 
     }
 }
 
-/// Suspend the TUI and hand the real terminal to `zmx attach` for direct,
+/// Suspend the TUI and hand the real terminal to `tmux attach` for direct,
 /// full-fidelity interaction with a line cook's session.
 ///
-/// Why shell out instead of forwarding keys ourselves: zmx already owns the
+/// Why shell out instead of forwarding keys ourselves: tmux already owns the
 /// session's pty and knows how to resize it and encode arbitrary keys
 /// (arrows, function keys, ctrl combos) correctly — reimplementing that here
-/// would mean rebuilding a terminal emulator. Attaching for real also fixes
-/// the pty's column width to match this terminal, which is the one thing
-/// that actually resolves the wrapping mismatch described in
-/// [`render_pane`] (as opposed to working around it after the fact).
+/// would mean rebuilding a terminal emulator. Attaching for real also resizes
+/// the pty's grid to match this terminal, which is the one thing that actually
+/// resolves the wrapping mismatch described in [`render_pane`] (as opposed to
+/// working around it after the fact).
 ///
-/// Leaving focus is zmx's own detach binding (`Ctrl+\`), deliberately not a
+/// Leaving focus is tmux's own detach binding (`Ctrl+b d`), deliberately not a
 /// binding of ours: agents commonly use Ctrl+A/Ctrl+E/Esc for their own
-/// readline/TUI editing, so intercepting one of those ourselves would steal
-/// it from the agent. `Ctrl+\` is the same low-conflict escape hatch zmx
-/// already chose for its own detach, so this is consistent with the tool
-/// it's built on rather than inventing a second convention.
+/// readline/TUI editing, so intercepting one of those ourselves would steal it
+/// from the agent. `Ctrl+b d` is tmux's built-in detach, so this is consistent
+/// with the tool it's built on rather than inventing a second convention — and
+/// unlike tmux's `Ctrl+\`, it reliably returns here (the detach bug that
+/// motivated the switch to tmux).
 fn focus_session<B: Backend + io::Write>(
     config: &Config,
     terminal: &mut Terminal<B>,
@@ -427,7 +428,7 @@ fn focus_session<B: Backend + io::Write>(
     execute!(terminal.backend_mut(), LeaveAlternateScreen)
         .context("failed to leave alternate screen")?;
 
-    let result = config.zmx.attach(yeschef_session(), Some(window));
+    let result = config.tmux.attach(yeschef_session(), Some(window));
 
     // Best-effort restore, mirroring `run_tui`'s teardown: if re-entering the
     // alternate screen also failed we're in worse trouble than a stale
@@ -457,7 +458,7 @@ fn focus_headchef<B: Backend + io::Write>(
     execute!(terminal.backend_mut(), LeaveAlternateScreen)
         .context("failed to leave alternate screen")?;
 
-    let result = config.zmx.attach_raw(headchef_session());
+    let result = config.tmux.attach_raw(headchef_session());
 
     let _ = enable_raw_mode();
     let _ = execute!(terminal.backend_mut(), EnterAlternateScreen);
@@ -484,7 +485,7 @@ fn ui(frame: &mut Frame, app: &App) {
 
 fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect) {
     let help = Line::styled(
-        " j/k move  ·  g/G top/bottom  ·  C head chef  ·  Enter focus  ·  Ctrl+\\ back  ·  q quit ",
+        " j/k move  ·  g/G top/bottom  ·  C head chef  ·  Enter focus  ·  Ctrl+b d back  ·  q quit ",
         Style::default().fg(Color::DarkGray),
     );
     frame.render_widget(Paragraph::new(help), area);
@@ -557,28 +558,27 @@ fn render_brigade(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 /// scrollback through a real terminal-emulation parser ([`vt100`]) instead
 /// of treating it as wrappable plain text.
 ///
-/// This matters because `zmx history --vt` isn't "coloured text" — it's a
-/// stateful replay stream (SGR colour codes interleaved with cursor-move and
-/// erase operations, however the agent's own screen was drawn). A previous
-/// attempt at this fix (branch `fix-tui-colors-wrap`) parsed that stream with
-/// a generic ANSI-to-text crate and re-wrapped it with ratatui's `Paragraph`
+/// This matters because `tmux capture-pane -e` isn't "coloured text" — it's a
+/// rendered cell grid re-serialized with SGR colour codes, one row per line
+/// (see [`capture_pane_styled`](crate::backend::TmuxBackend::capture_pane_styled),
+/// which also normalizes tmux's bare-LF row separators to CRLF so the parser
+/// anchors each row at column 0 instead of staircasing). A previous attempt at
+/// this fix (branch `fix-tui-colors-wrap`) parsed a similar stream with a
+/// generic ANSI-to-text crate and re-wrapped it with ratatui's `Paragraph`
 /// `Wrap`, which looked fine for a simple synthetic demo but breaks on real,
-/// richly-interactive agent output: cursor-addressed redraws aren't "long
-/// lines" that can be safely re-flowed at a different width, and doing so
-/// mangles box-drawing UI and misaligns content. Running the same bytes
-/// through an actual VT100 state machine (as zmx/ghostty and mprocs both do
-/// internally) resolves those operations into a concrete cell grid *before*
-/// we ever try to display it, so what we render is correct content — no
-/// re-wrap needed, since `vt100::Screen` already anchors to the live/bottom
-/// view.
+/// richly-interactive agent output: laid-out grid rows aren't "long lines"
+/// that can be safely re-flowed at a different width, and doing so mangles
+/// box-drawing UI and misaligns content. Running the same bytes through an
+/// actual VT100 state machine (as ghostty and mprocs both do internally)
+/// resolves the styling into a concrete cell grid *before* we ever try to
+/// display it, so what we render is correct content — no re-wrap needed, since
+/// `vt100::Screen` already anchors to the live/bottom view.
 ///
 /// The real, structural limitation this can't paper over: the agent process
-/// laid out that content assuming *its* pty's width, which zmx fixes once at
-/// spawn time (from whatever spawned `zmx run`'s own tty happened to be, or
-/// a 160x24 fallback if that wasn't a tty — see `zmx`'s `ipc.getTerminalSize`)
-/// and — unlike mprocs, which owns its ptys and keeps them continuously
-/// resized to the render area — exposes no way to resize a detached
-/// session's pty afterwards short of a live attach. If that width doesn't
+/// laid out that content assuming *its* pty's width, which tmux fixes to the
+/// session's size (yeschef launches detached sessions at a generous 200x50 —
+/// see `RealTmuxBackend::launch_detached` — and tmux keeps a detached
+/// session's grid at that size until a client attaches). If that width doesn't
 /// match this pane, content wider than our pane clips at the edge (graceful)
 /// rather than getting corrupted (what the naive re-wrap did) — but it won't
 /// be pixel-perfect. Focus mode (`Enter`, see [`focus_session`]) sidesteps
@@ -825,7 +825,7 @@ mod tests {
     /// needs preserved (see `render_pane`'s doc comment for why).
     #[test]
     fn recapture_uses_styled_capture_not_plain() {
-        use crate::backend::mock::{MockGitBackend, MockZmxBackend};
+        use crate::backend::mock::{MockGitBackend, MockTmuxBackend};
         use crate::store::Store;
         use tempfile::TempDir;
 
@@ -837,7 +837,7 @@ mod tests {
         store
             .register_ticket("proj", "feature", "feature", "proj-feature", "claude")
             .unwrap();
-        let zmx = MockZmxBackend::new().with_styled_pane(
+        let tmux = MockTmuxBackend::new().with_styled_pane(
             "yeschef",
             "proj-feature",
             "\x1b[32mhello\x1b[0m\n",
@@ -846,7 +846,7 @@ mod tests {
             home: tmp.path().to_path_buf(),
             store,
             git: Box::new(MockGitBackend::new()),
-            zmx: Box::new(zmx.clone()),
+            tmux: Box::new(tmux.clone()),
         };
 
         let mut app = App::new();
@@ -855,7 +855,7 @@ mod tests {
         assert_eq!(app.brigade().len(), 1);
         assert!(app.pane().contains("hello"));
 
-        let calls = zmx.recorded_calls();
+        let calls = tmux.recorded_calls();
         assert!(
             calls
                 .iter()
@@ -883,7 +883,9 @@ mod tests {
         assert_eq!(screen.contents(), "hello world");
     }
 
-    fn head_chef_config(zmx: &crate::backend::mock::MockZmxBackend) -> (tempfile::TempDir, Config) {
+    fn head_chef_config(
+        tmux: &crate::backend::mock::MockTmuxBackend,
+    ) -> (tempfile::TempDir, Config) {
         use crate::backend::mock::MockGitBackend;
         use crate::store::Store;
 
@@ -893,7 +895,7 @@ mod tests {
             home: tmp.path().to_path_buf(),
             store,
             git: Box::new(MockGitBackend::new()),
-            zmx: Box::new(zmx.clone()),
+            tmux: Box::new(tmux.clone()),
         };
         (tmp, config)
     }
@@ -903,18 +905,18 @@ mod tests {
     /// — and still preserve VT/ANSI styling.
     #[test]
     fn head_chef_recapture_uses_raw_styled_capture() {
-        use crate::backend::mock::MockZmxBackend;
+        use crate::backend::mock::MockTmuxBackend;
 
-        let zmx =
-            MockZmxBackend::new().with_raw_styled_pane("headchef", "\x1b[35mhi chef\x1b[0m\n");
-        let (_tmp, config) = head_chef_config(&zmx);
+        let tmux =
+            MockTmuxBackend::new().with_raw_styled_pane("headchef", "\x1b[35mhi chef\x1b[0m\n");
+        let (_tmp, config) = head_chef_config(&tmux);
 
         let mut app = App::new();
         app.select_headchef();
         recapture(&config, &mut app);
 
         assert!(app.pane().contains("hi chef"));
-        let calls = zmx.recorded_calls();
+        let calls = tmux.recorded_calls();
         assert!(
             calls.iter().any(|c| c == "capture_raw_styled:headchef"),
             "calls: {calls:?}"
@@ -929,16 +931,16 @@ mod tests {
     /// checkout, and is idempotent — a second call must not spawn a duplicate.
     #[test]
     fn ensure_headchef_launches_claude_in_src_and_is_idempotent() {
-        use crate::backend::mock::MockZmxBackend;
+        use crate::backend::mock::MockTmuxBackend;
 
-        let zmx = MockZmxBackend::new();
-        let (_tmp, config) = head_chef_config(&zmx);
+        let tmux = MockTmuxBackend::new();
+        let (_tmp, config) = head_chef_config(&tmux);
         let src = Path::new("/home/u/yeschef/yeschef-src");
 
         ensure_headchef(&config, src);
         ensure_headchef(&config, src);
 
-        let calls = zmx.recorded_calls();
+        let calls = tmux.recorded_calls();
         assert!(
             calls
                 .iter()
@@ -946,7 +948,7 @@ mod tests {
             "calls: {calls:?}"
         );
         // The bare session is registered exactly once despite two ensure calls.
-        let sessions = zmx.existing_sessions.lock().unwrap();
+        let sessions = tmux.existing_sessions.lock().unwrap();
         assert_eq!(
             sessions.iter().filter(|s| *s == "headchef").count(),
             1,

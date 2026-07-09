@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 
-use super::{BranchStatus, GitBackend, WindowInfo, ZmxBackend};
+use super::{BranchStatus, GitBackend, TmuxBackend, WindowInfo};
 
 // ---------------------------------------------------------------------------
 // Recording mock for GitBackend
@@ -131,15 +131,15 @@ impl GitBackend for MockGitBackend {
 }
 
 // ---------------------------------------------------------------------------
-// Recording mock for ZmxBackend
+// Recording mock for TmuxBackend
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Default)]
-pub struct MockZmxBackend {
+pub struct MockTmuxBackend {
     pub calls: Arc<Mutex<Vec<String>>>,
     pub existing_sessions: Arc<Mutex<Vec<String>>>,
     /// In-memory windows per session, so orchestration logic can be tested
-    /// without a real zmx. Keyed by session; value is the ordered window list.
+    /// without a real tmux. Keyed by session; value is the ordered window list.
     pub windows: Arc<Mutex<HashMap<String, Vec<WindowInfo>>>>,
     /// Canned pane content keyed by "`session:window`".
     pub pane_contents: Arc<Mutex<HashMap<String, String>>>,
@@ -148,7 +148,7 @@ pub struct MockZmxBackend {
     pub styled_pane_contents: Arc<Mutex<HashMap<String, String>>>,
 }
 
-impl MockZmxBackend {
+impl MockTmuxBackend {
     pub fn new() -> Self {
         Self::default()
     }
@@ -188,7 +188,7 @@ impl MockZmxBackend {
     }
 }
 
-impl ZmxBackend for MockZmxBackend {
+impl TmuxBackend for MockTmuxBackend {
     fn session_exists(&self, session: &str) -> Result<bool> {
         self.record(format!("session_exists:{session}"));
         Ok(self

@@ -187,13 +187,13 @@ fn resolve_projects(config: &Config, project: Option<&str>) -> Result<Vec<String
     }
 }
 
-/// Tear a ticket down: kill its zmx session, remove its worktree (pruning
+/// Tear a ticket down: kill its tmux session, remove its worktree (pruning
 /// stale metadata), delete the local branch, and deregister it. Each step is
 /// idempotent, so a ticket whose session or worktree is already gone reaps
 /// cleanly rather than erroring out.
 fn reap_ticket(config: &Config, session: &str, project: &str, ticket: &TicketRow) -> Result<()> {
     config
-        .zmx
+        .tmux
         .kill_window(session, &ticket.window)
         .with_context(|| format!("failed to kill window for '{project}/{}'", ticket.branch))?;
 
@@ -223,7 +223,7 @@ fn reap_ticket(config: &Config, session: &str, project: &str, ticket: &TicketRow
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::mock::{MockGitBackend, MockZmxBackend};
+    use crate::backend::mock::{MockGitBackend, MockTmuxBackend};
     use crate::store::Store;
     use tempfile::TempDir;
 
@@ -233,7 +233,7 @@ mod tests {
     /// Keep `_tmp` alive for the duration of the test.
     struct Harness {
         config: Config,
-        zmx: MockZmxBackend,
+        tmux: MockTmuxBackend,
         git: MockGitBackend,
         _tmp: TempDir,
     }
@@ -244,16 +244,16 @@ mod tests {
         store
             .add_project("proj", "https://example.com/proj.git")
             .unwrap();
-        let zmx = MockZmxBackend::new();
+        let tmux = MockTmuxBackend::new();
         let config = Config {
             home: tmp.path().to_path_buf(),
             store,
             git: Box::new(git.clone()),
-            zmx: Box::new(zmx.clone()),
+            tmux: Box::new(tmux.clone()),
         };
         Harness {
             config,
-            zmx,
+            tmux,
             git,
             _tmp: tmp,
         }
@@ -297,10 +297,10 @@ mod tests {
             .is_none());
 
         // The full teardown path ran: kill window, remove worktree, delete branch.
-        let zmx = h.zmx.recorded_calls();
+        let tmux = h.tmux.recorded_calls();
         assert!(
-            zmx.contains(&"kill_window:yeschef:proj-done".to_string()),
-            "zmx calls: {zmx:?}"
+            tmux.contains(&"kill_window:yeschef:proj-done".to_string()),
+            "tmux calls: {tmux:?}"
         );
         let git = h.git.recorded_calls();
         assert!(
@@ -351,10 +351,10 @@ mod tests {
             !git.iter().any(|c| c.starts_with("remove_worktree:")),
             "unmerged work must not be removed; git calls: {git:?}"
         );
-        let zmx = h.zmx.recorded_calls();
+        let tmux = h.tmux.recorded_calls();
         assert!(
-            !zmx.iter().any(|c| c.starts_with("kill_window:")),
-            "unmerged work must not be killed; zmx calls: {zmx:?}"
+            !tmux.iter().any(|c| c.starts_with("kill_window:")),
+            "unmerged work must not be killed; tmux calls: {tmux:?}"
         );
     }
 
@@ -384,7 +384,7 @@ mod tests {
             "dry run must not remove worktrees; git calls: {git:?}"
         );
         assert!(!h
-            .zmx
+            .tmux
             .recorded_calls()
             .iter()
             .any(|c| c.starts_with("kill_window:")));
@@ -503,10 +503,10 @@ mod tests {
             !git.iter().any(|c| c.starts_with("remove_worktree:")),
             "active/unmerged work must not be removed; git calls: {git:?}"
         );
-        let zmx = h.zmx.recorded_calls();
+        let tmux = h.tmux.recorded_calls();
         assert!(
-            !zmx.iter().any(|c| c.starts_with("kill_window:")),
-            "active/unmerged work must not be killed; zmx calls: {zmx:?}"
+            !tmux.iter().any(|c| c.starts_with("kill_window:")),
+            "active/unmerged work must not be killed; tmux calls: {tmux:?}"
         );
     }
 
