@@ -118,7 +118,7 @@
                 pkgs.git
               ];
               text = ''
-                exec cargo test --test e2e -- --ignored --test-threads=1 "$@"
+                exec cargo test --test e2e -- --ignored "$@"
               '';
             }
           }/bin/yeschef-e2e";
@@ -133,7 +133,7 @@
         # `nix flake check` and run as a separate `nix run .#e2e` CI step. Two
         # reasons:
         #   1. e2e drives REAL tmux sessions and REAL git worktrees on a
-        #      throwaway per-run `-L` socket (via `YESCHEF_TMUX_SOCKET`, never the
+        #      throwaway per-test `-L` socket (via `YESCHEF_TMUX_SOCKET`, never the
         #      live `yeschef` server) and spawns detached sessions. That is an
         #      impure integration test, not a hermetic build.
         #   2. naersk's test mode can't cleanly run the `#[ignore]`d e2e tests:

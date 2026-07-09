@@ -1,26 +1,31 @@
 //! End-to-end tests for yeschef.
 //!
 //! All tests are `#[ignore]` by default. Run with:
-//!   cargo test --test e2e -- --ignored --test-threads=1
+//!   cargo test --test e2e -- --ignored
 //!
 //! Requirements: `git` and `tmux` in PATH. No containers, no Nix, no macOS
 //! requirement — the tests drive real git worktrees and real tmux sessions.
 //!
 //! ## Socket isolation
 //!
-//! The suite NEVER touches the operator's live `yeschef` tmux server. It picks a
-//! unique, throwaway `-L` socket for the run (see [`test_socket`]), exports it as
-//! `YESCHEF_TMUX_SOCKET` so every spawned `yeschef` binary drives that same
-//! private server, and points every direct `tmux` helper here at it too. So a
-//! `kill-session` (or even a `kill-server`) in a test can only ever affect the
-//! test's own server — running the full suite from inside a live yeschef session
-//! leaves the operator's sessions untouched. `--test-threads=1` keeps the shared
-//! per-run sessions sane across tests (each test also uses a unique project name,
-//! so windows don't clash).
+//! The suite NEVER touches the operator's live `yeschef` tmux server. Each
+//! [`TestEnv`] mints its OWN unique, throwaway `-L` socket (see
+//! [`unique_socket`]), exports it as `YESCHEF_TMUX_SOCKET` so every `yeschef`
+//! binary that env spawns drives that same private server, and points every
+//! direct `tmux` helper on the env at it too. So a `kill-session` (or the
+//! whole-server `kill-server` teardown) can only ever affect that one env's
+//! server — never another test's, and never the operator's live session (even
+//! when the suite is run from inside one). When a `TestEnv` drops, its `Drop`
+//! impl runs `kill-server` to dispose of the private server process on pass,
+//! fail, or panic; the socket FILE itself lives under the env's temp dir (via
+//! `TMUX_TMPDIR`), so it is removed with that dir too — nothing (server or
+//! socket) leaks into the shared `/tmp/tmux-<uid>/` tree. Because every test has
+//! a fully independent server, the suite is safe under cargo's default parallel
+//! execution — no `--test-threads=1` needed.
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -29,17 +34,35 @@ use tempfile::TempDir;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// A sandboxed `YESCHEF_HOME` backed by a temp directory.
+/// A sandboxed `YESCHEF_HOME` backed by a temp directory, wired to its OWN
+/// private throwaway tmux server. The socket is unique per env (see
+/// [`unique_socket`]), so two tests — even running in parallel — never share a
+/// tmux server, and `Drop` tears the server down automatically.
 struct TestEnv {
-    _tmp: TempDir,
+    tmp: TempDir,
     home: std::path::PathBuf,
+    /// This env's private tmux `-L` socket name. Handed to every spawned
+    /// `yeschef` binary via `YESCHEF_TMUX_SOCKET` and to every direct `tmux`
+    /// helper on the env, and torn down in `Drop`.
+    socket: String,
 }
 
 impl TestEnv {
     fn new() -> Self {
-        let tmp = TempDir::new().expect("create temp dir");
+        // Root the temp dir at `/tmp` rather than the platform default. We point
+        // `TMUX_TMPDIR` here (see `cmd`) so the tmux socket lives under it and is
+        // cleaned up on drop — but a unix socket path has a hard ~104-byte limit
+        // (`sun_path`), and macOS's default temp dir (`/var/folders/…`) is deep
+        // enough that the socket path overflows it ("File name too long"). `/tmp`
+        // is short, present on both macOS and Linux, and is where tmux puts its
+        // sockets by default anyway, so the relocated socket path stays valid.
+        let tmp = TempDir::new_in("/tmp").expect("create temp dir under /tmp");
         let home = tmp.path().join("yeschef-home");
-        TestEnv { _tmp: tmp, home }
+        TestEnv {
+            tmp,
+            home,
+            socket: unique_socket(),
+        }
     }
 
     fn home_path(&self) -> &Path {
@@ -49,14 +72,66 @@ impl TestEnv {
     fn cmd(&self) -> assert_cmd::Command {
         let mut cmd = assert_cmd::Command::cargo_bin("yeschef").unwrap();
         cmd.env("YESCHEF_HOME", &self.home);
-        // Pin the spawned binary to the run's throwaway tmux socket so it never
-        // drives the operator's live `yeschef` server (see `test_socket`).
-        cmd.env("YESCHEF_TMUX_SOCKET", test_socket());
+        // Pin the spawned binary to THIS env's private tmux server: a unique
+        // `-L` socket name, relocated under this env's temp dir via
+        // `TMUX_TMPDIR`. The socket never drives the operator's live `yeschef`
+        // server or another test's server, and the relocation means its socket
+        // FILE is cleaned up with the temp dir on drop (see `Drop`) rather than
+        // littering the shared `/tmp/tmux-<uid>/` tree.
+        cmd.env("YESCHEF_TMUX_SOCKET", &self.socket);
+        cmd.env("TMUX_TMPDIR", self.tmp.path());
         cmd
     }
 
     fn init(&self) {
         self.cmd().arg("init").assert().success();
+    }
+
+    /// A `tmux` command wired to this env's private server (same `-L` socket +
+    /// `TMUX_TMPDIR` as [`TestEnv::cmd`], so they resolve to the same server).
+    /// Read helpers don't need `-f` — the server is already running with its
+    /// config from the binary's spawn.
+    fn tmux(&self, args: &[&str]) -> std::process::Output {
+        Command::new("tmux")
+            .env("TMUX_TMPDIR", self.tmp.path())
+            .args(["-L", &self.socket])
+            .args(args)
+            .output()
+            .expect("failed to run tmux")
+    }
+
+    /// Capture a window's scrollback via this env's tmux server.
+    fn capture(&self, window: &str) -> String {
+        let out = self.tmux(&["capture-pane", "-p", "-S", "-", "-t", &sid(window)]);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn window_exists(&self, window: &str) -> bool {
+        let id = sid(window);
+        let out = self.tmux(&["list-sessions", "-F", "#{session_name}"]);
+        out.status.success()
+            && String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .any(|l| l.trim() == id)
+    }
+}
+
+impl Drop for TestEnv {
+    fn drop(&mut self) {
+        // RAII teardown, two layers:
+        //   1. `kill-server` disposes this env's tmux server PROCESS (and every
+        //      session it held) promptly — on pass, fail, or panic — so no live
+        //      throwaway server ever leaks. `TMUX_TMPDIR` MUST match `cmd`/`tmux`
+        //      so `-L` resolves to the same socket the server actually runs on.
+        //   2. The socket FILE (which tmux leaves behind after `kill-server`)
+        //      lives under `self.tmp`, so it is removed with the temp dir when
+        //      the `tmp` field drops immediately after this — keeping the shared
+        //      `/tmp/tmux-<uid>/` tree clean with no socket-path math.
+        // Best-effort — the server may already be gone if none was started.
+        let _ = Command::new("tmux")
+            .env("TMUX_TMPDIR", self.tmp.path())
+            .args(["-L", &self.socket, "kill-server"])
+            .output();
     }
 }
 
@@ -110,68 +185,29 @@ fn unique_name() -> String {
     format!("t{pid:08x}{:04x}", nanos & 0xffff)
 }
 
-/// A unique, throwaway tmux `-L` socket for THIS test-binary run. Computed once
-/// (PID + startup nanos) and shared by every helper here and — via the
-/// `YESCHEF_TMUX_SOCKET` env var set in [`TestEnv::cmd`] — by every `yeschef`
-/// child process the tests spawn. This is the isolation guarantee: the suite
-/// stands up and tears down its own private server and can never touch the
-/// operator's live `yeschef` socket, even when run from inside a live session.
-fn test_socket() -> &'static str {
-    static SOCKET: OnceLock<String> = OnceLock::new();
-    SOCKET.get_or_init(|| {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .subsec_nanos();
-        let pid = std::process::id();
-        format!("yeschef-test-{pid:08x}-{nanos:08x}")
-    })
-}
-
-/// A `tmux` command wired to the run's throwaway server ([`test_socket`]).
-/// Read/kill helpers don't need `-f` (the server is already running with its
-/// config from the binary's spawn), so only the socket is set.
-fn tmux(args: &[&str]) -> std::process::Output {
-    Command::new("tmux")
-        .args(["-L", test_socket()])
-        .args(args)
-        .output()
-        .expect("failed to run tmux")
+/// A globally-unique tmux `-L` socket name for one [`TestEnv`]. Combines the
+/// PID, a nanosecond timestamp, and a process-wide atomic counter so no two
+/// envs ever collide: not two created back-to-back in the same thread (the
+/// counter breaks any timestamp tie), not two separate test-binary runs
+/// (distinct PIDs), and not a run beside a live yeschef instance (the
+/// `yeschef-test-` prefix differs from the production `yeschef` socket). Each
+/// env stands up and tears down the server on this socket by itself.
+fn unique_socket() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let pid = std::process::id();
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("yeschef-test-{pid:08x}-{nanos:x}-{seq:x}")
 }
 
 /// The flat tmux session id the backend uses for a ticket window:
 /// `<yeschef_session>-<window>`.
 fn sid(window: &str) -> String {
     format!("yeschef-{window}")
-}
-
-/// Kill a ticket's tmux session on drop (best-effort teardown).
-struct WindowCleanup(Vec<String>);
-
-impl Drop for WindowCleanup {
-    fn drop(&mut self) {
-        for window in &self.0 {
-            let _ = Command::new("tmux")
-                .args(["-L", test_socket(), "kill-session", "-t", &sid(window)])
-                .output();
-        }
-    }
-}
-
-/// Capture a window's scrollback via the real tmux.
-fn capture(window: &str) -> String {
-    let out = tmux(&["capture-pane", "-p", "-S", "-", "-t", &sid(window)]);
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-fn window_exists(window: &str) -> bool {
-    let id = sid(window);
-    let out = tmux(&["list-sessions", "-F", "#{session_name}"]);
-    out.status.success()
-        && String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .any(|l| l.trim() == id)
 }
 
 // ---------------------------------------------------------------------------
@@ -423,7 +459,6 @@ fn spawn_creates_worktree_and_live_window() {
         .success();
 
     let window = format!("{name}-demo");
-    let _cleanup = WindowCleanup(vec![window.clone()]);
 
     // The prompt is no longer passed inline; spawn writes it to a file and
     // hands the agent a short "read this file" instruction (guards against the
@@ -487,14 +522,14 @@ fn spawn_creates_worktree_and_live_window() {
 
     // tmux session is live.
     assert!(
-        window_exists(&window),
+        env.window_exists(&window),
         "tmux session for '{window}' should exist"
     );
 
     // Give the shell a moment to echo, then peek should show the marker and the
     // file-indirection instruction the agent was launched with.
     std::thread::sleep(std::time::Duration::from_millis(800));
-    let pane = capture(&window);
+    let pane = env.capture(&window);
     assert!(
         pane.contains("SPAWN_OK"),
         "pane should show the agent's output; got:\n{pane}"
@@ -533,7 +568,6 @@ fn send_reaches_the_pane() {
         .success();
 
     let window = format!("{name}-demo");
-    let _cleanup = WindowCleanup(vec![window.clone()]);
 
     // `cat` reading stdin echoes whatever we send into the pane and stays
     // alive (tmux destroys a session whose process exits). Wrapping it in
@@ -552,7 +586,7 @@ fn send_reaches_the_pane() {
         .success();
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    let pane = capture(&window);
+    let pane = env.capture(&window);
     assert!(
         pane.contains("HELLO_FROM_SEND"),
         "sent text should appear in the pane; got:\n{pane}"
@@ -572,7 +606,6 @@ fn kill_removes_window_and_deregisters() {
         .success();
 
     let window = format!("{name}-demo");
-    let _cleanup = WindowCleanup(vec![window.clone()]);
 
     env.cmd()
         // A genuinely long-lived agent so the session stays up for the check;
@@ -580,14 +613,20 @@ fn kill_removes_window_and_deregisters() {
         .args(["spawn", &name, "demo", "--agent", "sh -c 'sleep 30'"])
         .assert()
         .success();
-    assert!(window_exists(&window), "window should exist after spawn");
+    assert!(
+        env.window_exists(&window),
+        "window should exist after spawn"
+    );
 
     env.cmd()
         .args(["kill", &name, "demo", "--rm-worktree"])
         .assert()
         .success();
 
-    assert!(!window_exists(&window), "window should be gone after kill");
+    assert!(
+        !env.window_exists(&window),
+        "window should be gone after kill"
+    );
 
     let worktree = env
         .home_path()
@@ -625,7 +664,6 @@ fn cleanup_dry_run_reports_without_removing() {
         .success();
 
     let window = format!("{name}-demo");
-    let _cleanup = WindowCleanup(vec![window.clone()]);
 
     // A branch spawned from `main` points at main's tip, so it is an ancestor
     // of origin/main — classified "merged". That alone is no longer enough to
@@ -635,7 +673,10 @@ fn cleanup_dry_run_reports_without_removing() {
         .args(["spawn", &name, "demo", "--agent", "sh -c 'sleep 30'"])
         .assert()
         .success();
-    assert!(window_exists(&window), "window should exist after spawn");
+    assert!(
+        env.window_exists(&window),
+        "window should exist after spawn"
+    );
     env.cmd()
         .args(["ticket", &name, "demo", "status-set", "DONE"])
         .assert()
@@ -651,7 +692,10 @@ fn cleanup_dry_run_reports_without_removing() {
         .stdout(predicate::str::contains(format!("{name}/demo")));
 
     // The window, worktree, and registry entry all survive the dry run.
-    assert!(window_exists(&window), "dry run must not kill the window");
+    assert!(
+        env.window_exists(&window),
+        "dry run must not kill the window"
+    );
     let worktree = env
         .home_path()
         .join("projects")
@@ -679,13 +723,15 @@ fn cleanup_yes_reaps_merged_ticket() {
         .success();
 
     let window = format!("{name}-demo");
-    let _cleanup = WindowCleanup(vec![window.clone()]);
 
     env.cmd()
         .args(["spawn", &name, "demo", "--agent", "sh -c 'sleep 30'"])
         .assert()
         .success();
-    assert!(window_exists(&window), "window should exist after spawn");
+    assert!(
+        env.window_exists(&window),
+        "window should exist after spawn"
+    );
 
     // The branch is "merged" (points at main's tip), but reaping also requires
     // the cook to be inactive. Report DONE so both gates agree.
@@ -703,7 +749,7 @@ fn cleanup_yes_reaps_merged_ticket() {
 
     // Session, worktree, and registry entry are all gone.
     assert!(
-        !window_exists(&window),
+        !env.window_exists(&window),
         "window should be killed by cleanup"
     );
     let worktree = env
@@ -736,13 +782,15 @@ fn cleanup_yes_keeps_active_ticket_even_when_merged() {
         .success();
 
     let window = format!("{name}-demo");
-    let _cleanup = WindowCleanup(vec![window.clone()]);
 
     env.cmd()
         .args(["spawn", &name, "demo", "--agent", "sh -c 'sleep 30'"])
         .assert()
         .success();
-    assert!(window_exists(&window), "window should exist after spawn");
+    assert!(
+        env.window_exists(&window),
+        "window should exist after spawn"
+    );
 
     // Even with --yes, the merged-but-active ticket is kept, and the report
     // says why. (The summary line always contains the word "reaped" — e.g.
@@ -758,7 +806,7 @@ fn cleanup_yes_keeps_active_ticket_even_when_merged() {
 
     // Window, worktree, and registry entry all survive.
     assert!(
-        window_exists(&window),
+        env.window_exists(&window),
         "active ticket's window must survive"
     );
     let worktree = env
@@ -786,9 +834,6 @@ fn spawn_duplicate_window_rejected() {
         .args(["project", "add", &repo.url(), &name])
         .assert()
         .success();
-
-    let window = format!("{name}-demo");
-    let _cleanup = WindowCleanup(vec![window]);
 
     env.cmd()
         // A genuinely long-lived agent so the session stays up for the check;

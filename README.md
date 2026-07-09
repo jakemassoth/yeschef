@@ -63,7 +63,7 @@ nix build .#clippy     # clippy -D warnings -D clippy::pedantic
 nix build .#test       # or: cargo test  (unit tests, no external deps)
 
 # e2e (real git + tmux; no containers/macOS needed)
-cargo test --test e2e -- --ignored --test-threads=1
+cargo test --test e2e -- --ignored
 nix run .#e2e          # PATH-checks git + tmux first
 ```
 
