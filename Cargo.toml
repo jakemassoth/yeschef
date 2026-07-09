@@ -10,9 +10,6 @@ thiserror = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 dirs = "5"
 tempfile = "3"
-ratatui = "0.30.2"
-vt100 = "0.16.2"
-tui-term = "0.3.4"
 
 [[bin]]
 name = "yeschef"

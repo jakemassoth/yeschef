@@ -95,23 +95,25 @@ pub fn sanitize_branch(branch: &str) -> String {
     result
 }
 
-/// The brigade session name that namespaces every ticket window.
+/// The single brigade tmux session that holds every window: the head chef at
+/// window 0 and one window per line cook.
 ///
-/// The real tmux backend maps each ticket window onto a standalone tmux session
-/// named `<yeschef_session>-<window>`.
+/// The real tmux backend runs all cooks as windows inside this one session (see
+/// `backend::real`), which is what lets `tmux attach` show them together in a
+/// native tab bar — the yeschef TUI.
 pub fn yeschef_session() -> &'static str {
     "yeschef"
 }
 
-/// The bare tmux session id of the pinned head-chef Claude Code session that the
-/// TUI shows alongside the brigade.
+/// The window name of the pinned head chef — window 0 of the brigade session
+/// (see [`yeschef_session`]), a Claude Code session running in the yeschef
+/// source checkout.
 ///
-/// Deliberately *not* prefixed with [`yeschef_session`]: the real backend
-/// derives the brigade from tmux session ids by stripping the `yeschef-` prefix
-/// (see `list_windows` in `backend::real`), so a bare `headchef` id can never
-/// surface as a phantom ticket in the brigade list — it's addressed by its raw
-/// id via the backend's `*_raw` methods instead of the `<session>-<window>` map.
-pub fn headchef_session() -> &'static str {
+/// Safe to sit alongside cook windows: [`window_name`] always joins with a `-`,
+/// so a cook window is always `<project>-<branch>` and can never collide with
+/// the bare `headchef` name. Being window 0 makes "back to the head chef" a
+/// single keystroke (`prefix+0`) in the native tmux UI.
+pub fn headchef_window() -> &'static str {
     "headchef"
 }
 

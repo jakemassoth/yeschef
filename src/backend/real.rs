@@ -244,18 +244,20 @@ impl GitBackend for RealGitBackend {
 // TmuxBackend — wraps `tmux` (session attach/detach for the terminal)
 // ---------------------------------------------------------------------------
 //
-// The head-chef trait is window-oriented (one `yeschef` brigade holding many
-// ticket windows). tmux has real windows, but yeschef maps each ticket window
-// onto its own standalone tmux session named `yeschef-<window>` so tickets are
-// fully isolated: each has an independent lifecycle and detaches on its own
-// without disturbing the others. `session_exists`/`list_windows` then derive
-// the brigade's state from the set of `yeschef-…` sessions.
+// The whole brigade lives in ONE tmux session (`yeschef`): the head chef at
+// window 0 and one real tmux window per line cook, addressed as
+// `yeschef:<window>`. This is what lets `tmux attach` render every cook as a
+// tab (the yeschef TUI). A cook's window closes when its agent process exits
+// (tmux's default, no `remain-on-exit`), so a finished ticket simply drops out
+// of `list-windows` and surfaces as "gone".
 //
 // Every invocation runs against a private tmux server: a dedicated `-L` socket
-// with yeschef's own config file (`-f`). That keeps yeschef's sessions off the
+// with yeschef's own config file (`-f`). That keeps yeschef's session off the
 // user's default tmux server and stops it from reading or clobbering their
 // `~/.tmux.conf`. The config ships the `extended-keys`/`terminal-features`
-// settings that let Claude Code see Shift+Enter (see `config::ensure_tmux_conf`).
+// settings that let Claude Code see Shift+Enter, plus the `window-status-format`
+// that turns the status line into the colour-coded brigade tab bar (see
+// `config::ensure_tmux_conf`).
 //
 // The socket name is configurable via `YESCHEF_TMUX_SOCKET` (default `yeschef`),
 // resolved once per backend in `new`. Production leaves it unset and runs on
@@ -313,112 +315,110 @@ impl RealTmuxBackend {
         c
     }
 
-    /// Launch `command` in a new detached session with the exact id `id`,
-    /// rooted at `cwd`. Shared by `new_window` (ticket windows) and
-    /// `ensure_raw_session` (the bare head-chef session). Runs through a login
-    /// shell so the agent inherits a full environment (PATH, etc.); `-c` sets
-    /// the pane's start directory. A generous initial size gives the detached
-    /// agent room to draw before a client attaches (tmux would otherwise
-    /// default to 80x24) and resizes to the client's size on attach.
-    fn launch_detached(&self, id: &str, cwd: &Path, command: &str) -> Result<()> {
-        let status = self
-            .cmd()
-            .args(["new-session", "-d", "-s", id, "-x", "200", "-y", "50", "-c"])
-            .arg(cwd)
-            .args(["sh", "-lc", command])
-            .status()
-            .context("failed to run 'tmux new-session'")?;
-        if !status.success() {
-            bail!("tmux new-session failed for '{id}'");
-        }
-        Ok(())
-    }
-
-    /// Capture a session's full scrollback as a VT/ANSI byte stream (SGR
-    /// colours/attributes preserved via `-e`), addressed by its exact id.
-    /// Shared by `capture_pane_styled` and `capture_raw_styled`. tmux joins
-    /// captured rows with bare LF; a VT parser reads LF as line-feed-only and
-    /// staircases the output, so normalize to CRLF to anchor each row at
-    /// column 0. Returned whole, untrimmed (the styled replay is a unit).
-    fn capture_styled(&self, id: &str) -> Result<String> {
-        let output = self
-            .cmd()
-            .args(["capture-pane", "-e", "-p", "-S", "-", "-t", id])
-            .output()
-            .context("failed to run 'tmux capture-pane -e'")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "tmux capture-pane -e failed for '{}': {}",
-                id,
-                stderr.trim()
-            );
-        }
-        let raw = String::from_utf8_lossy(&output.stdout);
-        Ok(raw.replace('\n', "\r\n"))
-    }
-
-    /// Attach the current terminal to the session with the exact id `id`.
-    /// Shared by `attach` and `attach_raw`. `TMUX` is cleared from the child
-    /// environment: a caller invoked from inside a yeschef tmux session (e.g. a
-    /// line cook running `yeschef tui` on itself) would otherwise have tmux
-    /// refuse to nest, or target the caller's own session. Clearing it makes
-    /// the explicit `-t` target always win.
-    fn attach_id(&self, id: &str) -> Result<()> {
+    /// Attach the current terminal to `target` (a session, or a
+    /// `session:window`). `TMUX` is cleared from the child environment: a caller
+    /// invoked from inside a yeschef tmux session (e.g. a line cook running
+    /// `yeschef tui` on itself) would otherwise have tmux refuse to nest, or
+    /// target the caller's own session. Clearing it makes the explicit `-t`
+    /// target always win.
+    fn attach_target(&self, target: &str) -> Result<()> {
         let status = self
             .cmd()
             .env_remove("TMUX")
-            .args(["attach-session", "-t", id])
+            .args(["attach-session", "-t", target])
             .status()
             .context("failed to run 'tmux attach-session'")?;
         if !status.success() {
-            bail!("tmux attach-session failed for '{id}'");
+            bail!("tmux attach-session failed for '{target}'");
         }
         Ok(())
     }
-
-    /// List the names of all sessions on yeschef's private server (one per line
-    /// via `list-sessions -F '#{session_name}'`). No server / no sessions
-    /// yields an empty list rather than an error.
-    fn sessions(&self) -> Result<Vec<String>> {
-        let output = self
-            .cmd()
-            .args(["list-sessions", "-F", "#{session_name}"])
-            .output()
-            .context("failed to run 'tmux list-sessions'")?;
-        if !output.status.success() {
-            // No server running yet (or no sessions) — not an error.
-            return Ok(Vec::new());
-        }
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect())
-    }
 }
 
-/// Build the flat tmux session id for a ticket window: each window is its own
-/// standalone session, namespaced under the brigade session name.
-fn sid(session: &str, window: &str) -> String {
-    format!("{session}-{window}")
+/// The tmux target for a ticket window: a real window inside the single brigade
+/// session, addressed as `<session>:<window>`. Window names are sanitized to
+/// `[a-z0-9-]` (see `names::sanitize_branch`), so they never contain tmux's
+/// `:`/`.` target separators.
+fn target(session: &str, window: &str) -> String {
+    format!("{session}:{window}")
 }
 
 impl TmuxBackend for RealTmuxBackend {
     fn session_exists(&self, session: &str) -> Result<bool> {
-        // The brigade "session" exists if any ticket session is registered under it.
-        let prefix = format!("{session}-");
-        Ok(self.sessions()?.iter().any(|s| s.starts_with(&prefix)))
+        // `has-session` exits 0 when the session exists. No server / no session
+        // exits non-zero — both mean "does not exist", not an error.
+        let output = self
+            .cmd()
+            .args(["has-session", "-t", session])
+            .output()
+            .context("failed to run 'tmux has-session'")?;
+        Ok(output.status.success())
     }
 
-    fn ensure_session(&self, _session: &str) -> Result<()> {
-        // No-op: there is no parent session to hold windows — each ticket window
-        // is its own tmux session, created lazily by `new_window`.
+    fn ensure_session(
+        &self,
+        session: &str,
+        head_window: &str,
+        head_cwd: &Path,
+        head_command: &str,
+    ) -> Result<()> {
+        // Idempotent: an existing brigade session (and its head chef) is left
+        // untouched — re-running `tui`/`spawn` never restarts or duplicates it.
+        if self.session_exists(session)? {
+            return Ok(());
+        }
+        // Create the session detached with the head chef as window 0. `-n` names
+        // it, `-c` sets its start directory, `sh -lc` gives the agent a full
+        // login environment. A generous initial size lets the detached agent
+        // draw before a client attaches (tmux would otherwise default to 80x24);
+        // it resizes to the client's size on attach.
+        let status = self
+            .cmd()
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                session,
+                "-n",
+                head_window,
+                "-x",
+                "200",
+                "-y",
+                "50",
+                "-c",
+            ])
+            .arg(head_cwd)
+            .args(["sh", "-lc", head_command])
+            .status()
+            .context("failed to run 'tmux new-session'")?;
+        if !status.success() {
+            bail!("tmux new-session failed for '{session}'");
+        }
         Ok(())
     }
 
     fn new_window(&self, session: &str, window: &str, cwd: &Path, command: &str) -> Result<()> {
-        self.launch_detached(&sid(session, window), cwd, command)
+        // Add a real tmux window to the existing brigade session. `-t <session>:`
+        // (trailing colon) means "next free index in that session".
+        let status = self
+            .cmd()
+            .args([
+                "new-window",
+                "-d",
+                "-t",
+                &format!("{session}:"),
+                "-n",
+                window,
+                "-c",
+            ])
+            .arg(cwd)
+            .args(["sh", "-lc", command])
+            .status()
+            .context("failed to run 'tmux new-window'")?;
+        if !status.success() {
+            bail!("tmux new-window failed for '{session}:{window}'");
+        }
+        Ok(())
     }
 
     fn window_exists(&self, session: &str, window: &str) -> Result<bool> {
@@ -426,7 +426,7 @@ impl TmuxBackend for RealTmuxBackend {
     }
 
     fn send_keys(&self, session: &str, window: &str, text: &str) -> Result<()> {
-        let id = sid(session, window);
+        let id = target(session, window);
         // `send-keys -l` sends the text literally (no key-name lookup, so text
         // like "C-c" isn't interpreted); `--` guards leading dashes. Then a
         // separate `Enter` submits it, mirroring how the agent's line editor
@@ -451,7 +451,7 @@ impl TmuxBackend for RealTmuxBackend {
     }
 
     fn capture_pane(&self, session: &str, window: &str, lines: Option<usize>) -> Result<String> {
-        let id = sid(session, window);
+        let id = target(session, window);
         // `capture-pane -p -S -` dumps the full scrollback (from the start of
         // history) as de-styled text; trim to the last N lines ourselves, as
         // tmux has no last-N flag.
@@ -470,8 +470,7 @@ impl TmuxBackend for RealTmuxBackend {
         // screenful of blanks. Drop those trailing blanks before trimming to
         // the last N lines — otherwise the N-line window lands entirely on
         // padding and hides the real output (and `status`'s last-line probe
-        // comes up empty). zmx's `history` never padded, so this restores the
-        // same "last N lines of actual output" behaviour.
+        // comes up empty).
         let all: Vec<&str> = full.lines().collect();
         let end = all
             .iter()
@@ -489,86 +488,89 @@ impl TmuxBackend for RealTmuxBackend {
         Ok(text)
     }
 
-    fn capture_pane_styled(&self, session: &str, window: &str) -> Result<String> {
-        self.capture_styled(&sid(session, window))
+    fn set_window_status(&self, session: &str, window: &str, status: &str) -> Result<()> {
+        let id = target(session, window);
+        let output = self
+            .cmd()
+            .args(["set-window-option", "-t", &id, "@status", status])
+            .output()
+            .context("failed to run 'tmux set-window-option'")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // A window that's already gone is not an error — the status write
+            // just has nothing to decorate.
+            if stderr.contains("can't find") || stderr.contains("no such") {
+                return Ok(());
+            }
+            bail!(
+                "tmux set-window-option @status failed for '{}': {}",
+                id,
+                stderr.trim()
+            );
+        }
+        Ok(())
     }
 
     fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>> {
-        // Recover ticket windows from the set of `yeschef-…` sessions. A
-        // finished ticket's session is destroyed when its agent exits (tmux's
-        // default), so a vanished ticket surfaces as "gone" rather than "dead";
-        // both liveness flags stay false, matching `run_status`'s expectations.
-        let prefix = format!("{session}-");
-        let windows = self
-            .sessions()?
-            .into_iter()
-            .filter_map(|s| {
-                s.strip_prefix(&prefix).map(|name| WindowInfo {
-                    name: name.to_string(),
-                    active: false,
-                    dead: false,
-                })
+        // List the session's real windows. A finished cook's window closes when
+        // its agent exits (tmux's default), so it drops out here and surfaces as
+        // "gone". If the session doesn't exist yet, that's an empty brigade.
+        let output = self
+            .cmd()
+            .args([
+                "list-windows",
+                "-t",
+                session,
+                "-F",
+                "#{window_name}\t#{window_active}\t#{pane_dead}",
+            ])
+            .output()
+            .context("failed to run 'tmux list-windows'")?;
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+        let windows = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.splitn(3, '\t');
+                let name = fields.next()?.to_string();
+                if name.is_empty() {
+                    return None;
+                }
+                let active = fields.next() == Some("1");
+                let dead = fields.next() == Some("1");
+                Some(WindowInfo { name, active, dead })
             })
             .collect();
         Ok(windows)
     }
 
     fn kill_window(&self, session: &str, window: &str) -> Result<()> {
-        let id = sid(session, window);
+        let id = target(session, window);
         let output = self
             .cmd()
-            .args(["kill-session", "-t", &id])
+            .args(["kill-window", "-t", &id])
             .output()
-            .context("failed to run 'tmux kill-session'")?;
+            .context("failed to run 'tmux kill-window'")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // A session that's already gone is not an error for teardown.
+            // A window that's already gone is not an error for teardown.
             if stderr.contains("can't find") || stderr.contains("no such") {
                 return Ok(());
             }
-            bail!("tmux kill-session failed for '{}': {}", id, stderr.trim());
+            bail!("tmux kill-window failed for '{}': {}", id, stderr.trim());
         }
         Ok(())
     }
 
     fn attach(&self, session: &str, window: Option<&str>) -> Result<()> {
-        // With a ticket selected, attach to that ticket's session directly;
-        // otherwise fall back to the first live ticket session in the brigade.
-        let id = if let Some(w) = window {
-            sid(session, w)
-        } else {
-            let prefix = format!("{session}-");
-            self.sessions()?
-                .into_iter()
-                .find(|s| s.starts_with(&prefix))
-                .ok_or_else(|| anyhow::anyhow!("no live yeschef sessions to attach to"))?
-        };
-        self.attach_id(&id)
-    }
-
-    // ---- Bare-session (raw id) operations --------------------------------
-    //
-    // Twins of `new_window` / `capture_pane_styled` / `attach` that target a
-    // raw session id with no `sid` namespacing — used for the TUI's pinned
-    // head-chef session. They share the same private-server helpers
-    // (`launch_detached` / `capture_styled` / `attach_id`) as their namespaced
-    // counterparts, so the tmux invocation stays identical.
-
-    fn ensure_raw_session(&self, id: &str, cwd: &Path, command: &str) -> Result<()> {
-        // Idempotent: leave an existing session running untouched, so
-        // re-opening the TUI never restarts or duplicates the head chef.
-        if self.sessions()?.iter().any(|s| s == id) {
-            return Ok(());
+        // Attach to the brigade session, selecting a specific window if asked;
+        // otherwise land on the session's active window (window 0 / head chef on
+        // a fresh session, or wherever the last client left off).
+        match window {
+            Some(w) => self.attach_target(&target(session, w)),
+            None => self.attach_target(session),
         }
-        self.launch_detached(id, cwd, command)
-    }
-
-    fn capture_raw_styled(&self, id: &str) -> Result<String> {
-        self.capture_styled(id)
-    }
-
-    fn attach_raw(&self, id: &str) -> Result<()> {
-        self.attach_id(id)
     }
 }
 

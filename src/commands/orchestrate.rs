@@ -5,7 +5,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use crate::cli::TaskStatus;
 use crate::config::Config;
 use crate::guard::RollbackGuard;
-use crate::names::{sanitize_branch, window_name, yeschef_session};
+use crate::names::{headchef_window, sanitize_branch, window_name, yeschef_session};
 use crate::store::TicketRow;
 
 /// Default number of pane lines `peek` returns.
@@ -63,6 +63,34 @@ fn require_ticket(config: &Config, project: &str, branch: &str) -> Result<Ticket
     })
 }
 
+/// Ensure the brigade tmux session exists with the pinned head chef as window 0.
+/// Called before adding a cook window (`spawn`) and before opening the TUI, so
+/// the head chef is always present and reachable. Idempotent — an existing
+/// session (and its head chef) is left untouched.
+///
+/// The head chef runs in the yeschef source checkout (`resolve_src_dir`); if
+/// that can't be resolved or doesn't exist we fall back to the yeschef home so
+/// tmux always gets a valid start directory. Tagging window 0's `@status` as
+/// `CHEF` is what colours it in the tab bar.
+fn ensure_brigade_session(config: &Config) -> Result<()> {
+    let session = yeschef_session();
+    let cwd = crate::config::resolve_src_dir()
+        .ok()
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| config.home.clone());
+    let command = crate::config::resolve_headchef_command();
+    config
+        .tmux
+        .ensure_session(session, headchef_window(), &cwd, &command)
+        .context("failed to ensure the yeschef brigade session")?;
+    // Best-effort: tag the head chef so the tab bar shows it distinctly. A
+    // failure here shouldn't block spawning or attaching.
+    let _ = config
+        .tmux
+        .set_window_status(session, headchef_window(), "CHEF");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // spawn
 // ---------------------------------------------------------------------------
@@ -85,8 +113,9 @@ pub fn run_spawn(
     let bare_dir = config.bare_repo_dir(project);
     let worktree_path = config.worktree_dir(project, branch);
 
-    // Refuse to clobber a ticket that's already running in a live window.
-    config.tmux.ensure_session(session)?;
+    // Ensure the brigade session (head chef at window 0) exists, then refuse to
+    // clobber a ticket that's already running in a live window.
+    ensure_brigade_session(config)?;
     if config.tmux.window_exists(session, &window)? {
         bail!(
             "a window for '{project}/{branch}' already exists; use 'yeschef send/peek {project} {branch}' or 'yeschef kill {project} {branch}' first"
@@ -271,11 +300,17 @@ pub fn run_ticket_status_set(
     status: TaskStatus,
 ) -> Result<()> {
     // Ensure the ticket exists (clear error otherwise) before writing.
-    require_ticket(config, project, branch)?;
+    let ticket = require_ticket(config, project, branch)?;
     config
         .store
         .set_ticket_status(project, branch, status.as_str())
         .with_context(|| format!("failed to set status for '{project}/{branch}'"))?;
+    // Push the new status into the cook's tmux window so the brigade tab bar
+    // recolours it live. Best-effort: the window may be gone (a finished cook),
+    // and a missing tab shouldn't fail the status write that just persisted.
+    let _ = config
+        .tmux
+        .set_window_status(yeschef_session(), &ticket.window, status.as_str());
     println!("status of '{project}/{branch}' set to {}", status.as_str());
     Ok(())
 }
@@ -336,6 +371,25 @@ pub fn run_attach(config: &Config, project: Option<&str>, branch: Option<&str>) 
         .tmux
         .attach(session, window.as_deref())
         .context("failed to attach to yeschef session")?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// tui
+// ---------------------------------------------------------------------------
+
+/// `yeschef tui`: the native tmux UI. There is no custom rendering — we ensure
+/// the brigade session (head chef pinned at window 0) exists and hand the
+/// terminal to tmux. tmux's own status line shows every cook as a colour-coded
+/// tab (see `tmux.conf`'s `window-status-format`); `prefix+n`/`p`/`<n>` and
+/// `prefix+w` switch between cooks, `prefix+0` jumps back to the head chef, and
+/// `prefix+d` detaches cleanly back to the shell.
+pub fn run_tui(config: &Config) -> Result<()> {
+    ensure_brigade_session(config)?;
+    config
+        .tmux
+        .attach(yeschef_session(), None)
+        .context("failed to attach to the yeschef session")?;
     Ok(())
 }
 
@@ -524,6 +578,71 @@ mod tests {
         // Unknown ticket errors, doesn't create a row.
         let err = run_ticket_status_set(&h.config, "proj", "ghost", TaskStatus::Done).unwrap_err();
         assert!(err.to_string().contains("no ticket"), "{err}");
+    }
+
+    #[test]
+    fn status_set_pushes_into_the_tmux_tab_bar() {
+        // The whole point of the native TUI: a status-set updates the cook's
+        // `@status` tmux option so the tab bar recolours it live.
+        let h = harness(MockTmuxBackend::new());
+        run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap();
+
+        run_ticket_status_set(&h.config, "proj", "x", TaskStatus::InProgress).unwrap();
+
+        let calls = h.tmux.recorded_calls();
+        assert!(
+            calls.contains(&"set_window_status:yeschef:proj-x:IN_PROGRESS".to_string()),
+            "status-set must push @status into the cook's window; calls: {calls:?}"
+        );
+        assert_eq!(
+            h.tmux.window_status("yeschef", "proj-x").as_deref(),
+            Some("IN_PROGRESS")
+        );
+    }
+
+    #[test]
+    fn spawn_ensures_brigade_session_with_pinned_head_chef() {
+        let h = harness(MockTmuxBackend::new());
+        run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap();
+
+        // The brigade session is ensured with the head chef as window 0, tagged
+        // CHEF so the tab bar shows it distinctly.
+        let calls = h.tmux.recorded_calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("ensure_session:yeschef:headchef:")),
+            "spawn must ensure the brigade session with the head chef; calls: {calls:?}"
+        );
+        assert!(
+            calls.contains(&"set_window_status:yeschef:headchef:CHEF".to_string()),
+            "the head chef window must be tagged CHEF; calls: {calls:?}"
+        );
+        // The cook is a window in the same session, added after the ensure.
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("new_window:yeschef:proj-x:")),
+            "the cook must be a window in the brigade session; calls: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn tui_ensures_the_brigade_and_attaches() {
+        let h = harness(MockTmuxBackend::new());
+        run_tui(&h.config).unwrap();
+
+        let calls = h.tmux.recorded_calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("ensure_session:yeschef:headchef:")),
+            "tui must ensure the brigade session; calls: {calls:?}"
+        );
+        assert!(
+            calls.contains(&"attach:yeschef:-".to_string()),
+            "tui must attach to the whole session (no specific window); calls: {calls:?}"
+        );
     }
 
     #[test]
