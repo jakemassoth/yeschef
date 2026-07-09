@@ -259,7 +259,7 @@ impl GitBackend for RealGitBackend {
 //
 // The socket name is configurable via `YESCHEF_TMUX_SOCKET` (default `yeschef`),
 // resolved once per backend in `new`. Production leaves it unset and runs on
-// `yeschef`; the e2e tests point it at a throwaway per-run socket so they can
+// `yeschef`; the e2e tests point it at a throwaway per-test socket so they can
 // create and kill sessions — even a whole `kill-server` — without ever touching
 // the operator's live `yeschef` server.
 
@@ -274,7 +274,7 @@ pub const TMUX_SOCKET_ENV: &str = "YESCHEF_TMUX_SOCKET";
 /// Resolve the tmux `-L` socket name from [`TMUX_SOCKET_ENV`], falling back to
 /// [`DEFAULT_TMUX_SOCKET`] when it is unset or empty. This is the single source
 /// of truth for which tmux server every yeschef invocation drives — making it
-/// configurable is what lets the e2e suite run on a throwaway per-run socket
+/// configurable is what lets the e2e suite run on a throwaway per-test socket
 /// instead of the operator's live `yeschef` server.
 pub fn resolve_tmux_socket() -> String {
     match std::env::var(TMUX_SOCKET_ENV) {

@@ -45,9 +45,9 @@ nix build .#check
 nix build .#test   # or: cargo test --bin yeschef
 
 # E2E tests — require git + tmux on PATH (no containers/macOS). Drive real tmux
-# sessions on a throwaway per-run `-L` socket (never the live `yeschef` server),
-# so run single-threaded.
-cargo test --test e2e -- --ignored --test-threads=1
+# sessions on a throwaway per-TEST `-L` socket (never the live `yeschef`
+# server), so they run safely under cargo's default parallel execution.
+cargo test --test e2e -- --ignored
 # or via the flake (PATH-checks git + tmux first):
 nix run .#e2e
 nix run .#e2e -- <test_name>
@@ -56,12 +56,15 @@ nix run .#e2e -- <test_name>
 cargo test <test_name>
 ```
 
-The e2e suite is light now (no image builds). It uses unique per-test project names and
-runs on a **throwaway per-run tmux socket** — it picks a unique `-L` name (PID + nanos),
-exports it as `YESCHEF_TMUX_SOCKET` so the spawned `yeschef` binary and the tests' own
-`tmux` helpers drive that same private server, and never touches the operator's live
-`yeschef` server. `--test-threads=1` avoids cross-test races, and each test kills its own
-tmux session on drop.
+The e2e suite is light now (no image builds). It uses unique per-test project names and a
+**throwaway per-test tmux socket** — each `TestEnv` mints its own unique `-L` name
+(PID + nanos + a process-wide atomic counter), exports it as `YESCHEF_TMUX_SOCKET` so the
+spawned `yeschef` binary and the tests' own `tmux` helpers drive that one private server,
+and never touches the operator's live `yeschef` server. Because every test has a fully
+independent server, the suite runs safely under cargo's **default parallel execution** (no
+`--test-threads=1`). Each `TestEnv`'s `Drop` runs `kill-server` on its socket to dispose of
+the server automatically on pass, fail, or panic; the socket file lives under the test's
+temp dir (via `TMUX_TMPDIR`) so it is cleaned up too — nothing leaks into `/tmp/tmux-*/`.
 
 ## CI — run `nix flake check` before you push
 
@@ -76,7 +79,7 @@ nix run .#e2e          # the e2e suite (run separately — see below)
 `checks` in `flake.nix` covers **fmt** (`cargo fmt --check`), **nixfmt**
 (nixfmt-rfc-style on `flake.nix`), **lint** (strict clippy), and **test** (unit
 tests). The **e2e** suite is deliberately *not* a flake check: it drives real
-tmux sessions and real git worktrees (impure, though on a throwaway per-run `-L`
+tmux sessions and real git worktrees (impure, though on a throwaway per-test `-L`
 socket rather than the live `yeschef` server), so it runs un-sandboxed via
 `nix run .#e2e`. Run both before pushing.
 
@@ -94,8 +97,8 @@ actually exercise it:
 
 - Touching `store`/`names`/orchestration logic reachable from mocks → `cargo test --bin yeschef`.
 - Touching the real tmux/git backends or command wiring from `main.rs` → run the relevant
-  e2e test (`cargo test --test e2e -- --ignored --test-threads=1 <name>`). The e2e tests
-  are the only thing that exercises real `tmux`/`git` behavior.
+  e2e test (`cargo test --test e2e -- --ignored <name>`). The e2e tests are the only thing
+  that exercises real `tmux`/`git` behavior.
 - Touching a single e2e test → run that specific test, not the whole suite.
 
 ## Recording the terminal (demos / repros)
@@ -160,7 +163,7 @@ derived name stays a clean tmux session id.
   the user's default tmux server or `~/.tmux.conf`. The socket name is resolved once per
   backend by `backend::real::resolve_tmux_socket` — `YESCHEF_TMUX_SOCKET` if set, else the
   `DEFAULT_TMUX_SOCKET` (`"yeschef"`). Production leaves it unset; the e2e tests point it at
-  a throwaway per-run socket so their `kill-session`/`kill-server` calls can never reach the
+  a throwaway per-test socket so their `kill-session`/`kill-server` calls can never reach the
   operator's live `yeschef` server. The config is baked into the binary
   (`include_str!("../tmux.conf")`) and rewritten to `<home>/tmux.conf` on every
   `Config::load` (see `config::ensure_tmux_conf`).
@@ -190,7 +193,7 @@ derived name stays a clean tmux session id.
 
 Defaults to `~/yeschef`; overridden with `YESCHEF_HOME` (used by e2e tests for isolation).
 A second env var, `YESCHEF_TMUX_SOCKET`, overrides the tmux `-L` socket name (default
-`yeschef`) — the e2e tests set it to a throwaway per-run name so they never touch the
+`yeschef`) — the e2e tests set it to a throwaway per-test name so they never touch the
 operator's live tmux server. Layout:
 
 ```
