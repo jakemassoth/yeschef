@@ -256,21 +256,49 @@ impl GitBackend for RealGitBackend {
 // user's default tmux server and stops it from reading or clobbering their
 // `~/.tmux.conf`. The config ships the `extended-keys`/`terminal-features`
 // settings that let Claude Code see Shift+Enter (see `config::ensure_tmux_conf`).
+//
+// The socket name is configurable via `YESCHEF_TMUX_SOCKET` (default `yeschef`),
+// resolved once per backend in `new`. Production leaves it unset and runs on
+// `yeschef`; the e2e tests point it at a throwaway per-run socket so they can
+// create and kill sessions — even a whole `kill-server` — without ever touching
+// the operator's live `yeschef` server.
 
-/// The `-L` socket name for yeschef's private tmux server. Sessions on this
-/// socket are isolated from the user's default (`~/.tmux`) server.
-pub const TMUX_SOCKET: &str = "yeschef";
+/// Default `-L` socket name for yeschef's private tmux server, used when
+/// `YESCHEF_TMUX_SOCKET` is unset. Sessions on this socket are isolated from
+/// the user's default (`~/.tmux`) server.
+pub const DEFAULT_TMUX_SOCKET: &str = "yeschef";
+
+/// The env var that overrides the tmux `-L` socket name.
+pub const TMUX_SOCKET_ENV: &str = "YESCHEF_TMUX_SOCKET";
+
+/// Resolve the tmux `-L` socket name from [`TMUX_SOCKET_ENV`], falling back to
+/// [`DEFAULT_TMUX_SOCKET`] when it is unset or empty. This is the single source
+/// of truth for which tmux server every yeschef invocation drives — making it
+/// configurable is what lets the e2e suite run on a throwaway per-run socket
+/// instead of the operator's live `yeschef` server.
+pub fn resolve_tmux_socket() -> String {
+    match std::env::var(TMUX_SOCKET_ENV) {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => DEFAULT_TMUX_SOCKET.to_string(),
+    }
+}
 
 pub struct RealTmuxBackend {
     /// Path to yeschef's own tmux config, passed via `-f` so the private server
     /// starts with our `extended-keys`/scrollback settings and never sources
     /// the user's `~/.tmux.conf`.
     config_path: PathBuf,
+    /// The `-L` socket name this backend drives, resolved once from
+    /// [`resolve_tmux_socket`] at construction.
+    socket: String,
 }
 
 impl RealTmuxBackend {
     pub fn new(config_path: PathBuf) -> Self {
-        Self { config_path }
+        Self {
+            config_path,
+            socket: resolve_tmux_socket(),
+        }
     }
 
     /// A `tmux` command pre-wired to yeschef's private server: the dedicated
@@ -279,7 +307,7 @@ impl RealTmuxBackend {
     fn cmd(&self) -> Command {
         let mut c = Command::new("tmux");
         c.arg("-L")
-            .arg(TMUX_SOCKET)
+            .arg(&self.socket)
             .arg("-f")
             .arg(&self.config_path);
         c

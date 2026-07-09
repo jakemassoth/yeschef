@@ -5,6 +5,9 @@
 set -euo pipefail
 
 export YESCHEF_HOME=/tmp/yeschef-tmux-demo
+# Drive a throwaway tmux `-L` socket, NOT the operator's live `yeschef` server:
+# the reset `kill-server` below would otherwise nuke every running line cook.
+export YESCHEF_TMUX_SOCKET=yeschef-demo
 REPO=/tmp/yeschef-tmux-demo-repo
 COOK=/tmp/yeschef-demo-cook.sh
 BIN=./target/debug/yeschef
@@ -23,7 +26,7 @@ done
 COOKEOF
 
 rm -rf "$YESCHEF_HOME" "$REPO"
-tmux -L yeschef kill-server 2>/dev/null || true
+tmux -L "$YESCHEF_TMUX_SOCKET" kill-server 2>/dev/null || true
 
 mkdir -p "$REPO"
 git -C "$REPO" init -q -b main
