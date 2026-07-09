@@ -37,11 +37,16 @@ fn write_prompt_file(
 
 /// Build the status-reporting preamble every line cook is handed, with the
 /// actual project/branch substituted so the command is copy-pasteable.
+///
+/// The path must be the canonical source checkout `~/yeschef/yeschef-src` (no
+/// leading dot — see CLAUDE.md and `config::resolve_src_dir`). A wrong path here
+/// makes `status-set` silently fail for every cook, which in turn defeats
+/// `cleanup`'s status-gated reaping — so the tilde form is asserted by a test.
 fn status_protocol_preamble(project: &str, branch: &str) -> String {
     format!(
         "## Reporting your status\n\
          Report your task status to the head chef by running (from any dir):\n\
-        \x20   nix run ~/.yeschef/yeschef-src -- ticket {project} {branch} status-set <STATUS>\n\
+        \x20   nix run ~/yeschef/yeschef-src -- ticket {project} {branch} status-set <STATUS>\n\
          Set IN_PROGRESS when you start real work, BLOCKED if you're stuck and need a\n\
          decision, and DONE when the work is finished and the PR is open. Do this\n\
          proactively as your state changes."
@@ -485,6 +490,17 @@ mod tests {
         assert!(written.contains("## Reporting your status"));
         // The command is substituted with the real project/branch.
         assert!(written.contains("ticket proj feature/x status-set <STATUS>"));
+        // ...and points at the canonical source checkout `~/yeschef/yeschef-src`.
+        // A leading dot (`~/.yeschef/yeschef-src`) is the bug that made every
+        // cook's `status-set` silently fail, so guard against it explicitly.
+        assert!(
+            written.contains("nix run ~/yeschef/yeschef-src -- ticket proj feature/x status-set"),
+            "preamble must invoke the canonical ~/yeschef/yeschef-src path: {written}"
+        );
+        assert!(
+            !written.contains("~/.yeschef/yeschef-src"),
+            "preamble must not reference the broken dotted ~/.yeschef/yeschef-src path: {written}"
+        );
 
         let calls = h.tmux.recorded_calls();
         assert!(
