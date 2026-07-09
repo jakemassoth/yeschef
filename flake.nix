@@ -132,10 +132,10 @@
         # NOT covered here: the e2e suite. It is intentionally kept out of
         # `nix flake check` and run as a separate `nix run .#e2e` CI step. Two
         # reasons:
-        #   1. e2e drives REAL tmux sessions and REAL git worktrees, sharing the
-        #      global `yeschef` tmux server (a private `-L` socket) and spawning
-        #      detached sessions. That is an impure integration test, not a
-        #      hermetic build.
+        #   1. e2e drives REAL tmux sessions and REAL git worktrees on a
+        #      throwaway per-run `-L` socket (via `YESCHEF_TMUX_SOCKET`, never the
+        #      live `yeschef` server) and spawns detached sessions. That is an
+        #      impure integration test, not a hermetic build.
         #   2. naersk's test mode can't cleanly run the `#[ignore]`d e2e tests:
         #      its deps-only build phase replays the same `cargo test` options
         #      against a dummy src that has no `e2e` target and fails. Forcing it

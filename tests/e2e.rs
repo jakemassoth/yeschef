@@ -4,13 +4,23 @@
 //!   cargo test --test e2e -- --ignored --test-threads=1
 //!
 //! Requirements: `git` and `tmux` in PATH. No containers, no Nix, no macOS
-//! requirement — the head chef drives real git worktrees and real tmux
-//! sessions on yeschef's private `-L yeschef` server. `--test-threads=1` keeps
-//! the shared `yeschef` sessions sane across tests (each test uses a unique
-//! project name, so windows don't clash).
+//! requirement — the tests drive real git worktrees and real tmux sessions.
+//!
+//! ## Socket isolation
+//!
+//! The suite NEVER touches the operator's live `yeschef` tmux server. It picks a
+//! unique, throwaway `-L` socket for the run (see [`test_socket`]), exports it as
+//! `YESCHEF_TMUX_SOCKET` so every spawned `yeschef` binary drives that same
+//! private server, and points every direct `tmux` helper here at it too. So a
+//! `kill-session` (or even a `kill-server`) in a test can only ever affect the
+//! test's own server — running the full suite from inside a live yeschef session
+//! leaves the operator's sessions untouched. `--test-threads=1` keeps the shared
+//! per-run sessions sane across tests (each test also uses a unique project name,
+//! so windows don't clash).
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::OnceLock;
 
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -39,6 +49,9 @@ impl TestEnv {
     fn cmd(&self) -> assert_cmd::Command {
         let mut cmd = assert_cmd::Command::cargo_bin("yeschef").unwrap();
         cmd.env("YESCHEF_HOME", &self.home);
+        // Pin the spawned binary to the run's throwaway tmux socket so it never
+        // drives the operator's live `yeschef` server (see `test_socket`).
+        cmd.env("YESCHEF_TMUX_SOCKET", test_socket());
         cmd
     }
 
@@ -97,17 +110,31 @@ fn unique_name() -> String {
     format!("t{pid:08x}{:04x}", nanos & 0xffff)
 }
 
-/// yeschef's private tmux socket (`tmux -L`), mirroring
-/// `backend::real::TMUX_SOCKET`. All helpers here talk to that server so they
-/// observe exactly the sessions the yeschef binary created.
-const TMUX_SOCKET: &str = "yeschef";
+/// A unique, throwaway tmux `-L` socket for THIS test-binary run. Computed once
+/// (PID + startup nanos) and shared by every helper here and — via the
+/// `YESCHEF_TMUX_SOCKET` env var set in [`TestEnv::cmd`] — by every `yeschef`
+/// child process the tests spawn. This is the isolation guarantee: the suite
+/// stands up and tears down its own private server and can never touch the
+/// operator's live `yeschef` socket, even when run from inside a live session.
+fn test_socket() -> &'static str {
+    static SOCKET: OnceLock<String> = OnceLock::new();
+    SOCKET.get_or_init(|| {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        let pid = std::process::id();
+        format!("yeschef-test-{pid:08x}-{nanos:08x}")
+    })
+}
 
-/// A `tmux` command wired to yeschef's private server. Read/kill helpers don't
-/// need `-f` (the server is already running with its config from the binary's
-/// spawn), so only the socket is set.
+/// A `tmux` command wired to the run's throwaway server ([`test_socket`]).
+/// Read/kill helpers don't need `-f` (the server is already running with its
+/// config from the binary's spawn), so only the socket is set.
 fn tmux(args: &[&str]) -> std::process::Output {
     Command::new("tmux")
-        .args(["-L", TMUX_SOCKET])
+        .args(["-L", test_socket()])
         .args(args)
         .output()
         .expect("failed to run tmux")
@@ -126,7 +153,7 @@ impl Drop for WindowCleanup {
     fn drop(&mut self) {
         for window in &self.0 {
             let _ = Command::new("tmux")
-                .args(["-L", TMUX_SOCKET, "kill-session", "-t", &sid(window)])
+                .args(["-L", test_socket(), "kill-session", "-t", &sid(window)])
                 .output();
         }
     }
