@@ -32,7 +32,7 @@ yeschef peek  <project> <branch>              # read an agent's pane
 yeschef send  <project> <branch> "use the helper in utils.rs"   # one-line steer
 yeschef attach [<project> <branch>]           # watch the brigade live
 yeschef kill  <project> <branch> --rm-worktree
-yeschef cleanup [<project>] [--yes]           # reap merged/gone tickets (dry run unless --yes)
+yeschef cleanup [<project>] [--yes]           # reap merged/gone + DONE tickets (dry run unless --yes)
 ```
 
 `spawn --agent <cmd>` chooses the harness (default `claude`); `-p/--prompt` is passed as
