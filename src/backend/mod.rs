@@ -90,6 +90,14 @@ pub trait TmuxBackend: Send + Sync {
     /// Create a new window in the session running `command` in `cwd`. The
     /// session must already exist (see `ensure_session`).
     fn new_window(&self, session: &str, window: &str, cwd: &Path, command: &str) -> Result<()>;
+    /// Restart the process in an existing window *in place*: kill whatever is
+    /// running in its pane and relaunch `command` in `cwd`, keeping the window
+    /// itself — its name, tab position, and `@status` decoration — intact. This
+    /// is what `restart` uses to swap a running agent for a fresh process (e.g.
+    /// to pick up a Claude Code update) without disturbing the brigade layout;
+    /// unlike kill + `new_window`, the tab never disappears and reappears. The
+    /// window must already exist.
+    fn respawn_window(&self, session: &str, window: &str, cwd: &Path, command: &str) -> Result<()>;
     fn window_exists(&self, session: &str, window: &str) -> Result<bool>;
     /// Send a single line of text followed by Enter into a window.
     fn send_keys(&self, session: &str, window: &str, text: &str) -> Result<()>;

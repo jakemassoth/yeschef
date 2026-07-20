@@ -76,6 +76,13 @@ pub enum Commands {
     /// Open an interactive TUI to watch the brigade's live output
     Tui,
 
+    /// Restart every running agent in the brigade in place (head chef + all
+    /// live line cooks), resuming each one's prior conversation. Handy for
+    /// picking up a Claude Code update without losing context — the windows,
+    /// tabs, and worktrees are preserved; only the process inside each is
+    /// swapped for a fresh one.
+    Restart,
+
     /// Attach to a yeschef tmux session to watch the brigade
     Attach {
         /// Optional project to select a specific ticket window

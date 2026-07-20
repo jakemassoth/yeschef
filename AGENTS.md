@@ -77,6 +77,7 @@ is no installed binary to call.
 | `yeschef peek <project> <branch> [-n <lines>]` | Print the recent output of the agent's pane. |
 | `yeschef status` | Table of all tickets: agent, running/dead/gone, last pane line. |
 | `yeschef attach [<project> <branch>]` | Attach to the `yeschef` tmux session to watch (for the human): every cook is a colour-coded tab (`prefix+n`/`p`/`<n>` to switch, `prefix+w` tree, `prefix+0` for the head chef, `prefix+d` to detach). With a project+branch it opens on that cook's window. |
+| `yeschef restart` | Restart every running agent in the brigade **in place** — the head chef and all live cooks — resuming each one's prior conversation (`claude --continue`). The windows/tabs/worktrees are preserved; only the process inside each is swapped for a fresh one. Handy for picking up a Claude Code update without losing context. Cooks restart first, the head chef last (so it survives even when run from the head chef's own window); typically the human runs it from a plain shell. |
 | `yeschef kill <project> <branch> [--rm-worktree]` | Stop the window; optionally delete the worktree. |
 | `yeschef cleanup [<project>] [--yes]` | Reap stale tickets whose branch is merged or gone from the remote **and** whose line cook reported `DONE` — kill the session, remove the worktree + branch, and deregister. Never reaps active work: a ticket still `NEW`/`IN_PROGRESS`/`BLOCKED` is kept even if its branch looks merged/gone (a freshly-spawned branch has no commits yet, so it classifies as merged). Skips unmerged work. Dry run unless `--yes`. |
 

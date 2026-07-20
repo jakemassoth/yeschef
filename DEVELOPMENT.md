@@ -27,6 +27,7 @@ yeschef peek  <project> <branch>
 yeschef status
 yeschef tui                                      # attach to the brigade tab bar
 yeschef attach [<project> <branch>]
+yeschef restart                                  # restart every running agent in place, resuming its conversation
 yeschef kill  <project> <branch> [--rm-worktree]
 ```
 
@@ -128,11 +129,18 @@ unit-testable with no tmux). `Config` in `src/config.rs` holds both backends as
 Command logic lives in `src/commands/`:
 - `init.rs` — creates `~/yeschef/` layout, writes `AGENTS.md`, validates `git` + `tmux`.
 - `project.rs` — `add` (bare clone + worktrees dir) and `list`.
-- `orchestrate.rs` — `spawn`, `send`, `peek`, `status`, `kill`, `attach`, `tui`. `spawn`
-  is the meaty one: ensures the brigade session exists (head chef at window 0), creates
-  the worktree (guarded by `RollbackGuard`), opens a tmux window running the agent at the
-  worktree, and registers the ticket in SQLite. `tui` is ~3 lines: ensure the brigade
-  session, then `tmux attach` — the native tab bar is the whole UI (see the tmux notes).
+- `orchestrate.rs` — `spawn`, `send`, `peek`, `status`, `kill`, `attach`, `tui`, `restart`.
+  `spawn` is the meaty one: ensures the brigade session exists (head chef at window 0),
+  creates the worktree (guarded by `RollbackGuard`), opens a tmux window running the agent
+  at the worktree, and registers the ticket in SQLite. `tui` is ~3 lines: ensure the
+  brigade session, then `tmux attach` — the native tab bar is the whole UI (see the tmux
+  notes). `restart` swaps every live agent's process for a fresh one **in place** (tmux
+  `respawn-pane -k`, so the window/tab/worktree survive), resuming its prior conversation
+  (`claude --continue` for claude-family agents; other agents restart verbatim). It walks
+  the ticket registry intersected with the live window list, respawning cooks first and the
+  head chef last — so a `restart` issued from the head chef's own window, which respawning
+  window 0 would kill, still gets every cook back up first. It's the "pick up a Claude Code
+  update without losing context" button.
   The `-p` prompt is **never inlined** on the launch command line — a long prompt would
   overflow the OS arg-length limit and the agent harness, treating the giant positional
   arg as a path, dies with `ENAMETOOLONG`. Instead `spawn` writes the prompt to
@@ -197,6 +205,11 @@ target — and always joins with `-`, so a cook window can never collide with th
 - **Liveness.** tmux closes a window when its agent process exits (no `remain-on-exit`),
   so a finished ticket's window simply drops out of `list-windows` — it surfaces as "gone"
   in `status`, never "dead".
+- **Restart in place.** `respawn_window` runs `respawn-pane -k -c <cwd>` to kill a pane's
+  current process and relaunch a command in the *same* pane. The window (its name, tab
+  position, and `@status` colour) is untouched — unlike kill + `new-window`, which would
+  drop the tab and lose its decoration. This is what `restart` uses to swap a running agent
+  for a fresh one without disturbing the brigade layout.
 - **Detach.** `yeschef tui` (and `yeschef attach`) hand the real terminal to
   `tmux attach-session`; the human switches cooks with `prefix+n`/`p`/`<n>` (or the
   `prefix+w` tree), jumps to the head chef with `prefix+0`, and detaches cleanly with

@@ -393,10 +393,101 @@ pub fn run_tui(config: &Config) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// restart
+// ---------------------------------------------------------------------------
+
+/// Turn an agent command into the command used to *restart* it so it resumes
+/// its prior conversation rather than starting fresh. Only Claude Code takes
+/// `--continue` (reopen the most recent conversation in the pane's cwd), so we
+/// append it just for `claude`-family commands (`claude`, `claude --model …`).
+/// Any other agent (`codex`, `aider`, a test stand-in) is relaunched verbatim —
+/// a plain restart with no conversation-resume, which is the best we can do
+/// generically without breaking yeschef's agent-agnostic contract.
+fn resume_command(agent: &str) -> String {
+    if agent.split_whitespace().next() == Some("claude") {
+        format!("{agent} --continue")
+    } else {
+        agent.to_string()
+    }
+}
+
+/// `yeschef restart`: swap every running agent in the brigade — the head chef
+/// and every live line cook — for a fresh process, in place, resuming each
+/// one's prior conversation. This is the "I just updated Claude Code, pick up
+/// the new binary without losing context" button. Each window (its tab, colour,
+/// and worktree cwd) is preserved via `respawn_window`; only the process inside
+/// is replaced.
+///
+/// Cooks are restarted first and the head chef last. `restart` is normally run
+/// by the human from a plain shell outside the brigade, but if it's ever issued
+/// from the head chef's own window, respawning window 0 tears down the very
+/// process running this command — so doing the head chef last guarantees every
+/// cook is already back up before that can happen.
+///
+/// Only windows that are actually live are touched: a finished cook's window is
+/// already gone, and there's nothing to respawn. If no brigade session exists
+/// at all, there's nothing running to restart, so we say so rather than
+/// silently doing nothing.
+pub fn run_restart(config: &Config) -> Result<()> {
+    let session = yeschef_session();
+    if !config.tmux.session_exists(session)? {
+        bail!(
+            "no yeschef session running; nothing to restart (spawn a ticket or open the tui first)"
+        );
+    }
+
+    // A respawn on a missing pane is an error, so intersect the registry with
+    // the windows tmux actually reports live before touching anything.
+    let live: std::collections::HashSet<String> = config
+        .tmux
+        .list_windows(session)?
+        .into_iter()
+        .map(|w| w.name)
+        .collect();
+
+    let mut restarted = 0usize;
+    for ticket in config.store.list_tickets()? {
+        if !live.contains(&ticket.window) {
+            continue;
+        }
+        let cwd = config.worktree_dir(&ticket.project, &ticket.branch);
+        let command = resume_command(&ticket.agent);
+        config
+            .tmux
+            .respawn_window(session, &ticket.window, &cwd, &command)
+            .with_context(|| format!("failed to restart '{}/{}'", ticket.project, ticket.branch))?;
+        restarted += 1;
+        println!("restarted '{}/{}'", ticket.project, ticket.branch);
+    }
+
+    // Head chef last (see the doc comment) — and only if its window is live.
+    let head_restarted = if live.contains(headchef_window()) {
+        let cwd = crate::config::resolve_src_dir()
+            .ok()
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| config.home.clone());
+        let command = resume_command(&crate::config::resolve_headchef_command());
+        config
+            .tmux
+            .respawn_window(session, headchef_window(), &cwd, &command)
+            .context("failed to restart the head chef")?;
+        println!("restarted the head chef");
+        true
+    } else {
+        false
+    };
+
+    let chef = if head_restarted { " + head chef" } else { "" };
+    println!("restart complete ({restarted} cook(s){chef})");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::mock::{MockGitBackend, MockTmuxBackend};
+    use crate::backend::TmuxBackend;
     use crate::store::Store;
     use tempfile::TempDir;
 
@@ -720,5 +811,125 @@ mod tests {
             .recorded_calls()
             .iter()
             .any(|c| c.starts_with("remove_worktree")));
+    }
+
+    #[test]
+    fn resume_command_appends_continue_only_for_claude() {
+        // Claude Code resumes its prior conversation with `--continue`; the flag
+        // is appended whatever else the claude command carries.
+        assert_eq!(resume_command("claude"), "claude --continue");
+        assert_eq!(
+            resume_command("claude --model opus"),
+            "claude --model opus --continue"
+        );
+        // Other agents have no portable resume flag, so they restart verbatim.
+        assert_eq!(resume_command("codex"), "codex");
+        assert_eq!(
+            resume_command("sh -c 'exec sleep 300'"),
+            "sh -c 'exec sleep 300'"
+        );
+    }
+
+    #[test]
+    fn restart_respawns_live_cooks_and_head_chef_resuming_conversation() {
+        let h = harness(MockTmuxBackend::new());
+        run_spawn(&h.config, "proj", "a", None, "claude", None).unwrap();
+        run_spawn(&h.config, "proj", "b", None, "claude", None).unwrap();
+
+        run_restart(&h.config).unwrap();
+
+        let calls = h.tmux.recorded_calls();
+        // Each live cook is respawned in place with `--continue` (resume).
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("respawn_window:yeschef:proj-a:")
+                    && c.ends_with(":claude --continue")),
+            "cook a must be respawned with --continue; calls: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("respawn_window:yeschef:proj-b:")
+                    && c.ends_with(":claude --continue")),
+            "cook b must be respawned with --continue; calls: {calls:?}"
+        );
+        // The head chef (window 0) is respawned too, also resuming.
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("respawn_window:yeschef:headchef:")
+                    && c.ends_with(":claude --continue")),
+            "head chef must be respawned with --continue; calls: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn restart_does_the_head_chef_last() {
+        // If restart is run from the head chef's own window, respawning window 0
+        // kills the caller — so every cook must be respawned before the head
+        // chef is.
+        let h = harness(MockTmuxBackend::new());
+        run_spawn(&h.config, "proj", "a", None, "claude", None).unwrap();
+        run_spawn(&h.config, "proj", "b", None, "claude", None).unwrap();
+
+        run_restart(&h.config).unwrap();
+
+        let calls = h.tmux.recorded_calls();
+        let head_idx = calls
+            .iter()
+            .position(|c| c.starts_with("respawn_window:yeschef:headchef:"))
+            .expect("head chef respawn");
+        let last_cook_idx = calls
+            .iter()
+            .rposition(|c| {
+                c.starts_with("respawn_window:yeschef:proj-a:")
+                    || c.starts_with("respawn_window:yeschef:proj-b:")
+            })
+            .expect("cook respawn");
+        assert!(
+            head_idx > last_cook_idx,
+            "head chef must be respawned after all cooks; calls: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn restart_skips_gone_cook_windows() {
+        // A cook whose window has closed (finished agent) is still registered,
+        // but there's no pane to respawn — restart must skip it rather than
+        // erroring on a missing target.
+        let h = harness(MockTmuxBackend::new());
+        run_spawn(&h.config, "proj", "live", None, "claude", None).unwrap();
+        run_spawn(&h.config, "proj", "gone", None, "claude", None).unwrap();
+        // Simulate the "gone" cook's window closing (agent exited) while its
+        // ticket stays in the registry.
+        h.tmux.kill_window("yeschef", "proj-gone").unwrap();
+
+        run_restart(&h.config).unwrap();
+
+        let calls = h.tmux.recorded_calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("respawn_window:yeschef:proj-live:")),
+            "live cook must be respawned; calls: {calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.starts_with("respawn_window:yeschef:proj-gone:")),
+            "gone cook must NOT be respawned; calls: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn restart_without_session_errors() {
+        let h = harness(MockTmuxBackend::new());
+        // No spawn / tui, so the brigade session was never created.
+        let err = run_restart(&h.config).unwrap_err();
+        assert!(
+            err.to_string().contains("nothing to restart"),
+            "expected a clear 'nothing to restart' error; got: {err}"
+        );
     }
 }

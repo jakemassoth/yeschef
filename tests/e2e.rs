@@ -829,6 +829,100 @@ fn cleanup_yes_keeps_active_ticket_even_when_merged() {
         .stdout(predicate::str::contains(format!("{name}/demo")));
 }
 
+// ---------------------------------------------------------------------------
+// restart
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "requires git + tmux"]
+fn restart_respawns_agent_in_place() {
+    // `restart` swaps the process inside each live window for a fresh one while
+    // keeping the window itself (its tab/position/worktree). We prove the swap
+    // with a stand-in agent that appends a tick to a file in its worktree each
+    // time it starts, then sleeps: one tick after spawn, a second after
+    // restart, with the window surviving throughout.
+    let env = TestEnv::new();
+    env.init();
+    let repo = SampleRepo::new();
+    let name = unique_name();
+    env.cmd()
+        .args(["project", "add", &repo.url(), &name])
+        .assert()
+        .success();
+
+    let window = format!("{name}-demo");
+    // `echo … >> restart_ticks.txt` lands in the pane's cwd (the worktree,
+    // re-pinned via respawn's `-c`); the read-this-file instruction arrives in
+    // `$0` and is ignored, so the agent never treats it as a filename.
+    env.cmd()
+        .args([
+            "spawn",
+            &name,
+            "demo",
+            "--agent",
+            "sh -c 'echo tick >> restart_ticks.txt; sleep 30'",
+        ])
+        .assert()
+        .success();
+
+    let ticks = env
+        .home_path()
+        .join("projects")
+        .join(&name)
+        .join("worktrees")
+        .join("demo")
+        .join("restart_ticks.txt");
+
+    let count_ticks = || std::fs::read_to_string(&ticks).map_or(0, |s| s.lines().count());
+
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    assert!(
+        env.window_exists(&window),
+        "window should exist after spawn"
+    );
+    assert_eq!(count_ticks(), 1, "agent should have ticked once on spawn");
+
+    // Restart: the head chef and every live cook are respawned in place.
+    env.cmd()
+        .args(["restart"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("restarted"))
+        .stdout(predicate::str::contains(format!("{name}/demo")));
+
+    std::thread::sleep(std::time::Duration::from_millis(800));
+
+    // The window is still there (respawn preserves it — not kill + recreate),
+    // and the agent process was genuinely relaunched (a second tick).
+    assert!(
+        env.window_exists(&window),
+        "window must survive restart (respawned in place, not killed)"
+    );
+    assert!(
+        env.window_exists("headchef"),
+        "the head chef window must survive restart too"
+    );
+    assert_eq!(
+        count_ticks(),
+        2,
+        "restart should relaunch the agent in the same worktree (a second tick)"
+    );
+}
+
+#[test]
+#[ignore = "requires git + tmux"]
+fn restart_without_session_errors() {
+    // With no brigade session up, there's nothing running to restart — say so
+    // rather than silently doing nothing.
+    let env = TestEnv::new();
+    env.init();
+    env.cmd()
+        .args(["restart"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("nothing to restart"));
+}
+
 #[test]
 #[ignore = "requires git + tmux"]
 fn spawn_duplicate_window_rejected() {
