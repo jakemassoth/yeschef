@@ -120,6 +120,26 @@ impl TestEnv {
                 .lines()
                 .any(|l| l.trim() == window)
     }
+
+    /// The brigade's windows as `(index, name)` pairs, ordered by tmux's own
+    /// window ordering. Used to assert indices stay gap-free after a close.
+    fn window_indices(&self) -> Vec<(u32, String)> {
+        let out = self.tmux(&[
+            "list-windows",
+            "-t",
+            "yeschef",
+            "-F",
+            "#{window_index}\t#{window_name}",
+        ]);
+        assert!(out.status.success(), "list-windows failed");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let (idx, name) = l.split_once('\t')?;
+                Some((idx.trim().parse().ok()?, name.trim().to_string()))
+            })
+            .collect()
+    }
 }
 
 impl Drop for TestEnv {
@@ -651,6 +671,79 @@ fn kill_removes_window_and_deregisters() {
         .assert()
         .success()
         .stdout(predicate::str::contains(format!("{name}/demo")).not());
+}
+
+// ---------------------------------------------------------------------------
+// window reindexing
+// ---------------------------------------------------------------------------
+
+/// Killing a middle cook must not leave a hole in the window numbering: the
+/// survivors renumber so the head chef stays at 0 and cooks stay contiguous
+/// (`renumber-windows on` in tmux.conf). Otherwise `prefix+<n>` stops landing on
+/// the nth cook.
+#[test]
+#[ignore = "requires git + tmux"]
+fn killing_a_middle_cook_reindexes_windows_gap_free() {
+    let env = TestEnv::new();
+    env.init();
+    let repo = SampleRepo::new();
+    let name = unique_name();
+    env.cmd()
+        .args(["project", "add", &repo.url(), &name])
+        .assert()
+        .success();
+
+    // Three long-lived cooks: head chef at 0, cooks at 1, 2, 3.
+    for branch in ["alpha", "bravo", "charlie"] {
+        env.cmd()
+            .args(["spawn", &name, branch, "--agent", "sh -c 'sleep 30'"])
+            .assert()
+            .success();
+    }
+
+    let before = env.window_indices();
+    let idx = |b: &str| {
+        before
+            .iter()
+            .find(|(_, n)| *n == format!("{name}-{b}"))
+            .unwrap_or_else(|| panic!("{b} window missing; got {before:?}"))
+            .0
+    };
+    assert_eq!(idx("alpha"), 1, "before: {before:?}");
+    assert_eq!(idx("bravo"), 2, "before: {before:?}");
+    assert_eq!(idx("charlie"), 3, "before: {before:?}");
+
+    // Kill the MIDDLE cook. Without renumbering this would leave 0, 1, 3.
+    env.cmd().args(["kill", &name, "bravo"]).assert().success();
+
+    // tmux applies renumber-windows on close; give the server a beat to settle.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // Survivors are contiguous from 0, with charlie pulled down into the hole.
+    let after = env.window_indices();
+    let names: Vec<&str> = after.iter().map(|(_, n)| n.as_str()).collect();
+    assert!(
+        !names.contains(&format!("{name}-bravo").as_str()),
+        "killed cook still present: {after:?}"
+    );
+    let indices: Vec<u32> = after.iter().map(|(i, _)| *i).collect();
+    assert_eq!(
+        indices,
+        vec![0, 1, 2],
+        "windows must renumber gap-free after a middle kill; got {after:?}"
+    );
+    let at = |i: u32| {
+        after
+            .iter()
+            .find(|(idx, _)| *idx == i)
+            .map(|(_, n)| n.as_str())
+    };
+    assert_eq!(at(1), Some(format!("{name}-alpha").as_str()), "{after:?}");
+    assert_eq!(
+        at(2),
+        Some(format!("{name}-charlie").as_str()),
+        "charlie should slide into the freed slot; {after:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

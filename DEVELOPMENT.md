@@ -205,6 +205,14 @@ target — and always joins with `-`, so a cook window can never collide with th
 - **Liveness.** tmux closes a window when its agent process exits (no `remain-on-exit`),
   so a finished ticket's window simply drops out of `list-windows` — it surfaces as "gone"
   in `status`, never "dead".
+- **Gap-free numbering.** `tmux.conf` sets `renumber-windows on`, so whenever a window
+  closes — a cook killed, or its agent exiting (see Liveness) drops the window — tmux
+  renumbers the survivors: the head chef stays at 0 and the cooks stay 1, 2, 3… with no
+  holes. Without it a closed middle cook leaves a gap (0, 2, 3…) and `prefix+<n>` stops
+  landing on the nth cook. yeschef addresses windows by *name* (`yeschef:<window>`), never
+  by index, so renumbering is invisible to send/peek/kill — it only keeps the human's tab
+  order and `prefix+<n>` navigation sane. Covered by the `killing_a_middle_cook_reindexes_windows_gap_free`
+  e2e test.
 - **Restart in place.** `respawn_window` runs `respawn-pane -k -c <cwd>` to kill a pane's
   current process and relaunch a command in the *same* pane. The window (its name, tab
   position, and `@status` colour) is untouched — unlike kill + `new-window`, which would
