@@ -243,6 +243,20 @@ impl TmuxBackend for MockTmuxBackend {
         Ok(())
     }
 
+    fn respawn_window(&self, session: &str, window: &str, cwd: &Path, command: &str) -> Result<()> {
+        self.record(format!(
+            "respawn_window:{}:{}:{}:{}",
+            session,
+            window,
+            cwd.display(),
+            command
+        ));
+        // Respawn keeps the window in place, so the in-memory window list is
+        // unchanged — mirroring the real backend, which swaps only the pane's
+        // process. Callers only respawn windows they've confirmed live.
+        Ok(())
+    }
+
     fn window_exists(&self, session: &str, window: &str) -> Result<bool> {
         self.record(format!("window_exists:{session}:{window}"));
         Ok(self

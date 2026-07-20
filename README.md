@@ -36,6 +36,7 @@ yeschef peek  <project> <branch>              # read an agent's pane
 yeschef send  <project> <branch> "use the helper in utils.rs"   # one-line steer
 yeschef tui                                   # attach to the brigade tab bar (native tmux UI)
 yeschef attach [<project> <branch>]           # watch the brigade live
+yeschef restart                               # restart every running agent in place, resuming its conversation
 yeschef kill  <project> <branch> --rm-worktree
 yeschef cleanup [<project>] [--yes]           # reap merged/gone + DONE tickets (dry run unless --yes)
 ```
@@ -72,6 +73,6 @@ nix run .#e2e          # PATH-checks git + tmux first
 
 ## Status
 
-The core orchestration loop (spawn / send / peek / status / kill / attach). Heavier
+The core orchestration loop (spawn / send / peek / status / kill / attach / restart). Heavier
 firstmate-style features — an event-driven supervision watcher, ship/scout ticket types,
 PR/merge automation, and persistent specialist agents — are not implemented yet.

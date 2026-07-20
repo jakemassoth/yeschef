@@ -421,6 +421,29 @@ impl TmuxBackend for RealTmuxBackend {
         Ok(())
     }
 
+    fn respawn_window(&self, session: &str, window: &str, cwd: &Path, command: &str) -> Result<()> {
+        let id = target(session, window);
+        // `respawn-pane -k` kills the pane's current process and relaunches
+        // `command` in the SAME pane, so the window survives untouched (its
+        // name, tab position, and `@status` colour all persist) — unlike kill +
+        // `new-window`, which would drop the tab and lose its decoration. `-c`
+        // re-pins the start directory to the worktree, and `sh -lc` gives the
+        // agent the same login environment `new_window` does. The pane must
+        // already be live (callers only respawn windows they've confirmed
+        // present); a missing target is a real error here, not a no-op.
+        let status = self
+            .cmd()
+            .args(["respawn-pane", "-k", "-c"])
+            .arg(cwd)
+            .args(["-t", &id, "sh", "-lc", command])
+            .status()
+            .context("failed to run 'tmux respawn-pane'")?;
+        if !status.success() {
+            bail!("tmux respawn-pane failed for '{id}'");
+        }
+        Ok(())
+    }
+
     fn window_exists(&self, session: &str, window: &str) -> Result<bool> {
         Ok(self.list_windows(session)?.iter().any(|w| w.name == window))
     }

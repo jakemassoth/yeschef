@@ -91,6 +91,7 @@ fn run(cli: Cli) -> Result<()> {
         } => orchestrate::run_peek(&config, &project, &branch, lines)?,
         Commands::Status => orchestrate::run_status(&config)?,
         Commands::Tui => orchestrate::run_tui(&config)?,
+        Commands::Restart => orchestrate::run_restart(&config)?,
         Commands::Attach { project, branch } => {
             orchestrate::run_attach(&config, project.as_deref(), branch.as_deref())?;
         }
