@@ -12,6 +12,15 @@
       url = "github:nix-community/naersk";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # herdr — an "agent multiplexer" (github.com/ogulcancelik/herdr) we are
+    # evaluating as a possible replacement for yeschef's tmux TUI/session layer
+    # (see docs/herdr-investigation.md). Pulled in only so it is a runnable via
+    # this flake (`nix run .#herdr`); nothing in yeschef links or depends on it
+    # yet. Deliberately NOT `follows`-ing our nixpkgs/rust-overlay: herdr's flake
+    # pins its own toolchain (rust-toolchain.toml + zig/cmake native deps), so we
+    # let it build exactly as upstream locks it. Deduping via `follows` is a
+    # future optimization to validate, not a first-step requirement.
+    herdr.url = "github:ogulcancelik/herdr";
   };
 
   outputs =
@@ -21,6 +30,7 @@
       flake-utils,
       rust-overlay,
       naersk,
+      herdr,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -88,6 +98,19 @@
             src = ./.;
             mode = "test";
           };
+
+          # nix build .#herdr  /  nix run .#herdr
+          #
+          # Re-expose upstream herdr's default package so it is buildable and
+          # runnable through THIS flake — the concrete first step of the herdr
+          # investigation (docs/herdr-investigation.md). It is built straight
+          # from herdr's own flake (its pinned toolchain + native deps), NOT from
+          # yeschef sources, and nothing in yeschef depends on it. Kept out of
+          # `checks`/`devShells.default` on purpose so the normal
+          # build/lint/test/dev loop never has to compile herdr (a heavy
+          # zig/cmake Rust build); you only pay for it when you explicitly ask
+          # for `.#herdr`.
+          herdr = herdr.packages.${system}.default;
         };
 
         # nix run .#e2e [-- <test-name>]  — runs the e2e suite. It drives the
@@ -100,6 +123,12 @@
           type = "app";
           program = "${self.packages.${system}.default}/bin/yeschef";
         };
+
+        # nix run .#herdr [-- <args>]  — launch herdr through this flake. Bare
+        # `herdr` attaches/launches its TUI; pass CLI args for its command groups
+        # (`nix run .#herdr -- pane list ...`). This is what makes herdr
+        # available as a runnable via the flake, per the investigation ticket.
+        apps.herdr = herdr.apps.${system}.default;
 
         apps.e2e = {
           type = "app";
