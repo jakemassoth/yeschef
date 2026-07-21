@@ -1,11 +1,13 @@
+use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 
-use std::path::PathBuf;
-
-use super::{BranchStatus, GitBackend, TmuxBackend, WindowInfo};
+use super::{BranchStatus, GitBackend, HerdrBackend, Workspace, WorkspaceInfo};
 
 // ---------------------------------------------------------------------------
 // GitBackend — wraps `git`
@@ -241,359 +243,345 @@ impl GitBackend for RealGitBackend {
 }
 
 // ---------------------------------------------------------------------------
-// TmuxBackend — wraps `tmux` (session attach/detach for the terminal)
+// HerdrBackend — wraps the `herdr` agent multiplexer
 // ---------------------------------------------------------------------------
 //
-// The whole brigade lives in ONE tmux session (`yeschef`): the head chef at
-// window 0 and one real tmux window per line cook, addressed as
-// `yeschef:<window>`. This is what lets `tmux attach` render every cook as a
-// tab (the yeschef TUI). A cook's window closes when its agent process exits
-// (tmux's default, no `remain-on-exit`), so a finished ticket simply drops out
-// of `list-windows` and surfaces as "gone".
+// The whole brigade lives in ONE named herdr session (`resolve_herdr_session`,
+// default `yeschef`), served by a single background herdr server. Each line cook
+// is a herdr WORKSPACE labelled `<project>/<branch>`, whose root PANE runs the
+// agent; the head chef is another workspace. Naming the session is what isolates
+// yeschef's brigade from a human's own default `herdr` session — the analog of
+// the old tmux backend's private `-L` socket.
 //
-// Every invocation runs against a private tmux server: a dedicated `-L` socket
-// with yeschef's own config file (`-f`). That keeps yeschef's session off the
-// user's default tmux server and stops it from reading or clobbering their
-// `~/.tmux.conf`. The config ships the `extended-keys`/`terminal-features`
-// settings that let Claude Code see Shift+Enter, plus the `window-status-format`
-// that turns the status line into the colour-coded brigade tab bar (see
-// `config::ensure_tmux_conf`).
+// yeschef drives everything by shelling out to the `herdr` CLI (arm's-length,
+// exactly as the tmux backend shelled out to `tmux`), never linking herdr as a
+// library. herdr's socket-API subcommands emit JSON, from which we parse the
+// opaque workspace/pane ids and the live agent status.
 //
-// The socket name is configurable via `YESCHEF_TMUX_SOCKET` (default `yeschef`),
-// resolved once per backend in `new`. Production leaves it unset and runs on
-// `yeschef`; the e2e tests point it at a throwaway per-test socket so they can
-// create and kill sessions — even a whole `kill-server` — without ever touching
-// the operator's live `yeschef` server.
+// The session name is configurable via `YESCHEF_HERDR_SESSION` (default
+// `yeschef`), resolved once per backend in `new`. Production leaves it unset and
+// runs on `yeschef`; the e2e tests point it at a throwaway per-test session (with
+// a short `XDG_CONFIG_HOME`, since herdr derives its socket path from there) so
+// they can create and tear down sessions without ever touching the operator's
+// live `yeschef` brigade.
 
-/// Default `-L` socket name for yeschef's private tmux server, used when
-/// `YESCHEF_TMUX_SOCKET` is unset. Sessions on this socket are isolated from
-/// the user's default (`~/.tmux`) server.
-pub const DEFAULT_TMUX_SOCKET: &str = "yeschef";
+/// Default herdr session name for the brigade, used when
+/// [`HERDR_SESSION_ENV`] is unset. A named session isolates yeschef's
+/// workspaces from a human's own default `herdr` session.
+pub const DEFAULT_HERDR_SESSION: &str = "yeschef";
 
-/// The env var that overrides the tmux `-L` socket name.
-pub const TMUX_SOCKET_ENV: &str = "YESCHEF_TMUX_SOCKET";
+/// The env var that overrides the herdr session name.
+pub const HERDR_SESSION_ENV: &str = "YESCHEF_HERDR_SESSION";
 
-/// Resolve the tmux `-L` socket name from [`TMUX_SOCKET_ENV`], falling back to
-/// [`DEFAULT_TMUX_SOCKET`] when it is unset or empty. This is the single source
-/// of truth for which tmux server every yeschef invocation drives — making it
-/// configurable is what lets the e2e suite run on a throwaway per-test socket
-/// instead of the operator's live `yeschef` server.
-pub fn resolve_tmux_socket() -> String {
-    match std::env::var(TMUX_SOCKET_ENV) {
+/// The `--source` id yeschef stamps on the display metadata it reports, so its
+/// decoration is distinct from any other reporter and from herdr's own
+/// live-detection lifecycle authority.
+const REPORT_SOURCE: &str = "yeschef";
+
+/// How long `ensure_server` waits for a freshly-spawned server to accept
+/// connections before giving up.
+const SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Resolve the herdr session name from [`HERDR_SESSION_ENV`], falling back to
+/// [`DEFAULT_HERDR_SESSION`] when it is unset or empty. This is the single
+/// source of truth for which herdr session every yeschef invocation drives —
+/// making it configurable is what lets the e2e suite run on a throwaway per-test
+/// session instead of the operator's live `yeschef` brigade.
+pub fn resolve_herdr_session() -> String {
+    match std::env::var(HERDR_SESSION_ENV) {
         Ok(s) if !s.trim().is_empty() => s,
-        _ => DEFAULT_TMUX_SOCKET.to_string(),
+        _ => DEFAULT_HERDR_SESSION.to_string(),
     }
 }
 
-pub struct RealTmuxBackend {
-    /// Path to yeschef's own tmux config, passed via `-f` so the private server
-    /// starts with our `extended-keys`/scrollback settings and never sources
-    /// the user's `~/.tmux.conf`.
-    config_path: PathBuf,
-    /// The `-L` socket name this backend drives, resolved once from
-    /// [`resolve_tmux_socket`] at construction.
-    socket: String,
+pub struct RealHerdrBackend {
+    /// The herdr session name this backend drives, resolved once from
+    /// [`resolve_herdr_session`] at construction and passed as `--session` on
+    /// every invocation.
+    session: String,
 }
 
-impl RealTmuxBackend {
-    pub fn new(config_path: PathBuf) -> Self {
+impl RealHerdrBackend {
+    pub fn new() -> Self {
         Self {
-            config_path,
-            socket: resolve_tmux_socket(),
+            session: resolve_herdr_session(),
         }
     }
 
-    /// A `tmux` command pre-wired to yeschef's private server: the dedicated
-    /// `-L` socket plus `-f <our config>`. Global flags must precede the tmux
-    /// subcommand, so callers append the subcommand and its args after this.
+    /// A `herdr` command pre-wired to the brigade session (`--session <name>`).
+    /// The global `--session` flag must precede the subcommand, so callers append
+    /// the subcommand and its args after this.
     fn cmd(&self) -> Command {
-        let mut c = Command::new("tmux");
-        c.arg("-L")
-            .arg(&self.socket)
-            .arg("-f")
-            .arg(&self.config_path);
+        let mut c = Command::new("herdr");
+        c.arg("--session").arg(&self.session);
         c
     }
 
-    /// Attach the current terminal to `target` (a session, or a
-    /// `session:window`). `TMUX` is cleared from the child environment: a caller
-    /// invoked from inside a yeschef tmux session (e.g. a line cook running
-    /// `yeschef tui` on itself) would otherwise have tmux refuse to nest, or
-    /// target the caller's own session. Clearing it makes the explicit `-t`
-    /// target always win.
-    fn attach_target(&self, target: &str) -> Result<()> {
-        let status = self
-            .cmd()
-            .env_remove("TMUX")
-            .args(["attach-session", "-t", target])
-            .status()
-            .context("failed to run 'tmux attach-session'")?;
-        if !status.success() {
-            bail!("tmux attach-session failed for '{target}'");
-        }
-        Ok(())
-    }
-}
-
-/// The tmux target for a ticket window: a real window inside the single brigade
-/// session, addressed as `<session>:<window>`. Window names are sanitized to
-/// `[a-z0-9-]` (see `names::sanitize_branch`), so they never contain tmux's
-/// `:`/`.` target separators.
-fn target(session: &str, window: &str) -> String {
-    format!("{session}:{window}")
-}
-
-impl TmuxBackend for RealTmuxBackend {
-    fn session_exists(&self, session: &str) -> Result<bool> {
-        // `has-session` exits 0 when the session exists. No server / no session
-        // exits non-zero — both mean "does not exist", not an error.
+    /// Run a herdr subcommand and return its stdout, erroring with the command's
+    /// stderr on failure.
+    fn run_json(&self, args: &[&str]) -> Result<String> {
         let output = self
             .cmd()
-            .args(["has-session", "-t", session])
+            .args(args)
             .output()
-            .context("failed to run 'tmux has-session'")?;
-        Ok(output.status.success())
-    }
-
-    fn ensure_session(
-        &self,
-        session: &str,
-        head_window: &str,
-        head_cwd: &Path,
-        head_command: &str,
-    ) -> Result<()> {
-        // Idempotent: an existing brigade session (and its head chef) is left
-        // untouched — re-running `tui`/`spawn` never restarts or duplicates it.
-        if self.session_exists(session)? {
-            return Ok(());
-        }
-        // Create the session detached with the head chef as window 0. `-n` names
-        // it, `-c` sets its start directory, `sh -lc` gives the agent a full
-        // login environment. A generous initial size lets the detached agent
-        // draw before a client attaches (tmux would otherwise default to 80x24);
-        // it resizes to the client's size on attach.
-        let status = self
-            .cmd()
-            .args([
-                "new-session",
-                "-d",
-                "-s",
-                session,
-                "-n",
-                head_window,
-                "-x",
-                "200",
-                "-y",
-                "50",
-                "-c",
-            ])
-            .arg(head_cwd)
-            .args(["sh", "-lc", head_command])
-            .status()
-            .context("failed to run 'tmux new-session'")?;
-        if !status.success() {
-            bail!("tmux new-session failed for '{session}'");
-        }
-        Ok(())
-    }
-
-    fn new_window(&self, session: &str, window: &str, cwd: &Path, command: &str) -> Result<()> {
-        // Add a real tmux window to the existing brigade session. `-t <session>:`
-        // (trailing colon) means "next free index in that session".
-        let status = self
-            .cmd()
-            .args([
-                "new-window",
-                "-d",
-                "-t",
-                &format!("{session}:"),
-                "-n",
-                window,
-                "-c",
-            ])
-            .arg(cwd)
-            .args(["sh", "-lc", command])
-            .status()
-            .context("failed to run 'tmux new-window'")?;
-        if !status.success() {
-            bail!("tmux new-window failed for '{session}:{window}'");
-        }
-        Ok(())
-    }
-
-    fn respawn_window(&self, session: &str, window: &str, cwd: &Path, command: &str) -> Result<()> {
-        let id = target(session, window);
-        // `respawn-pane -k` kills the pane's current process and relaunches
-        // `command` in the SAME pane, so the window survives untouched (its
-        // name, tab position, and `@status` colour all persist) — unlike kill +
-        // `new-window`, which would drop the tab and lose its decoration. `-c`
-        // re-pins the start directory to the worktree, and `sh -lc` gives the
-        // agent the same login environment `new_window` does. The pane must
-        // already be live (callers only respawn windows they've confirmed
-        // present); a missing target is a real error here, not a no-op.
-        let status = self
-            .cmd()
-            .args(["respawn-pane", "-k", "-c"])
-            .arg(cwd)
-            .args(["-t", &id, "sh", "-lc", command])
-            .status()
-            .context("failed to run 'tmux respawn-pane'")?;
-        if !status.success() {
-            bail!("tmux respawn-pane failed for '{id}'");
-        }
-        Ok(())
-    }
-
-    fn window_exists(&self, session: &str, window: &str) -> Result<bool> {
-        Ok(self.list_windows(session)?.iter().any(|w| w.name == window))
-    }
-
-    fn send_keys(&self, session: &str, window: &str, text: &str) -> Result<()> {
-        let id = target(session, window);
-        // `send-keys -l` sends the text literally (no key-name lookup, so text
-        // like "C-c" isn't interpreted); `--` guards leading dashes. Then a
-        // separate `Enter` submits it, mirroring how the agent's line editor
-        // reads a carriage return.
-        let status = self
-            .cmd()
-            .args(["send-keys", "-t", &id, "-l", "--", text])
-            .status()
-            .context("failed to run 'tmux send-keys'")?;
-        if !status.success() {
-            bail!("tmux send-keys failed for '{id}'");
-        }
-        let status = self
-            .cmd()
-            .args(["send-keys", "-t", &id, "Enter"])
-            .status()
-            .context("failed to run 'tmux send-keys' (Enter)")?;
-        if !status.success() {
-            bail!("tmux send-keys (Enter) failed for '{id}'");
-        }
-        Ok(())
-    }
-
-    fn capture_pane(&self, session: &str, window: &str, lines: Option<usize>) -> Result<String> {
-        let id = target(session, window);
-        // `capture-pane -p -S -` dumps the full scrollback (from the start of
-        // history) as de-styled text; trim to the last N lines ourselves, as
-        // tmux has no last-N flag.
-        let output = self
-            .cmd()
-            .args(["capture-pane", "-p", "-S", "-", "-t", &id])
-            .output()
-            .context("failed to run 'tmux capture-pane'")?;
+            .with_context(|| format!("failed to run 'herdr {}'", args.join(" ")))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("tmux capture-pane failed for '{}': {}", id, stderr.trim());
+            bail!("herdr {} failed: {}", args.join(" "), stderr.trim());
         }
-        let full = String::from_utf8_lossy(&output.stdout).into_owned();
-        // `capture-pane` pads the visible pane to its full height with blank
-        // lines, so a session whose output sits near the top is followed by a
-        // screenful of blanks. Drop those trailing blanks before trimming to
-        // the last N lines — otherwise the N-line window lands entirely on
-        // padding and hides the real output (and `status`'s last-line probe
-        // comes up empty).
-        let all: Vec<&str> = full.lines().collect();
-        let end = all
-            .iter()
-            .rposition(|l| !l.trim().is_empty())
-            .map_or(0, |i| i + 1);
-        let content = &all[..end];
-        let tail = match lines {
-            Some(n) => &content[content.len().saturating_sub(n)..],
-            None => content,
-        };
-        let mut text = tail.join("\n");
-        if !text.is_empty() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+}
+
+// --- JSON shapes emitted by herdr's socket-API subcommands -----------------
+//
+// Only the fields yeschef needs are declared; `serde` ignores the rest.
+
+/// `herdr workspace create` → `{ "result": { "workspace": {...}, "root_pane": {...} } }`
+#[derive(Deserialize)]
+struct CreateEnvelope {
+    result: CreateResult,
+}
+
+#[derive(Deserialize)]
+struct CreateResult {
+    workspace: WorkspaceObj,
+    root_pane: PaneObj,
+}
+
+/// `herdr workspace list` → `{ "result": { "workspaces": [ {...}, ... ] } }`
+#[derive(Deserialize)]
+struct ListEnvelope {
+    result: ListResult,
+}
+
+#[derive(Deserialize)]
+struct ListResult {
+    workspaces: Vec<WorkspaceObj>,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceObj {
+    workspace_id: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    agent_status: String,
+}
+
+#[derive(Deserialize)]
+struct PaneObj {
+    pane_id: String,
+}
+
+impl HerdrBackend for RealHerdrBackend {
+    fn server_running(&self) -> Result<bool> {
+        // `status server` reports the running server for this session. When the
+        // server is down it exits non-zero (or prints a non-running status);
+        // either way that is "not running", not an error.
+        let output = self
+            .cmd()
+            .args(["status", "server"])
+            .output()
+            .context("failed to run 'herdr status server'")?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(output.status.success() && stdout.contains("status: running"))
+    }
+
+    fn ensure_server(&self) -> Result<()> {
+        // Idempotent: a running brigade server is left untouched.
+        if self.server_running()? {
+            return Ok(());
+        }
+        // Launch the headless server detached: a new session (`setsid`) with no
+        // controlling terminal and its stdio discarded, so it outlives this
+        // one-shot yeschef process (and the agents running inside it survive
+        // after `spawn` returns) and is immune to the invoking terminal's SIGHUP.
+        let mut cmd = self.cmd();
+        cmd.arg("server")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // SAFETY: `setsid` is async-signal-safe and touches no shared state in
+        // the forked child before the exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        cmd.spawn().context("failed to start the herdr server")?;
+
+        // Wait for the freshly-spawned server to accept connections.
+        let deadline = Instant::now() + SERVER_START_TIMEOUT;
+        while Instant::now() < deadline {
+            if self.server_running()? {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(50));
+        }
+        bail!("herdr server did not come up within {SERVER_START_TIMEOUT:?}");
+    }
+
+    fn stop_server(&self) -> Result<()> {
+        // A no-op if the server is already down.
+        if !self.server_running()? {
+            return Ok(());
+        }
+        let output = self
+            .cmd()
+            .args(["server", "stop"])
+            .output()
+            .context("failed to run 'herdr server stop'")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("herdr server stop failed: {}", stderr.trim());
+        }
+        Ok(())
+    }
+
+    fn create_workspace(&self, label: &str, cwd: &Path) -> Result<Workspace> {
+        let cwd = cwd.to_string_lossy();
+        let stdout = self.run_json(&[
+            "workspace",
+            "create",
+            "--cwd",
+            &cwd,
+            "--label",
+            label,
+            "--no-focus",
+        ])?;
+        let env: CreateEnvelope = serde_json::from_str(&stdout).with_context(|| {
+            format!("failed to parse 'herdr workspace create' output: {stdout}")
+        })?;
+        Ok(Workspace {
+            workspace_id: env.result.workspace.workspace_id,
+            pane_id: env.result.root_pane.pane_id,
+        })
+    }
+
+    fn run_in_pane(&self, pane_id: &str, text: &str) -> Result<()> {
+        // `pane run` types the text into the pane and submits it (Enter),
+        // mirroring the old tmux `send-keys -l` + `Enter`.
+        let output = self
+            .cmd()
+            .args(["pane", "run", pane_id, text])
+            .output()
+            .context("failed to run 'herdr pane run'")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("herdr pane run failed for '{pane_id}': {}", stderr.trim());
+        }
+        Ok(())
+    }
+
+    fn read_pane(&self, pane_id: &str, lines: Option<usize>) -> Result<String> {
+        // `pane read --source recent` returns the pane's recent output as plain
+        // (de-styled) text; `--lines N` limits it to the last N lines.
+        let mut cmd = self.cmd();
+        cmd.args(["pane", "read", pane_id, "--source", "recent"]);
+        let lines_str;
+        if let Some(n) = lines {
+            lines_str = n.to_string();
+            cmd.args(["--lines", &lines_str]);
+        }
+        let output = cmd.output().context("failed to run 'herdr pane read'")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("herdr pane read failed for '{pane_id}': {}", stderr.trim());
+        }
+        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+        if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
         }
         Ok(text)
     }
 
-    fn set_window_status(&self, session: &str, window: &str, status: &str) -> Result<()> {
-        let id = target(session, window);
+    fn set_display_status(&self, pane_id: &str, status: &str) -> Result<()> {
+        // Display-only pane metadata (a `status=<STATUS>` token), so herdr's TUI
+        // can surface the cook's self-reported task status. This does NOT touch
+        // herdr's own live agent-status detection.
+        let token = format!("status={status}");
         let output = self
             .cmd()
-            .args(["set-window-option", "-t", &id, "@status", status])
+            .args([
+                "pane",
+                "report-metadata",
+                pane_id,
+                "--source",
+                REPORT_SOURCE,
+                "--token",
+                &token,
+            ])
             .output()
-            .context("failed to run 'tmux set-window-option'")?;
+            .context("failed to run 'herdr pane report-metadata'")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // A window that's already gone is not an error — the status write
-            // just has nothing to decorate.
-            if stderr.contains("can't find") || stderr.contains("no such") {
-                return Ok(());
-            }
             bail!(
-                "tmux set-window-option @status failed for '{}': {}",
-                id,
+                "herdr pane report-metadata failed for '{pane_id}': {}",
                 stderr.trim()
             );
         }
         Ok(())
     }
 
-    fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>> {
-        // List the session's real windows. A finished cook's window closes when
-        // its agent exits (tmux's default), so it drops out here and surfaces as
-        // "gone". If the session doesn't exist yet, that's an empty brigade.
-        let output = self
-            .cmd()
-            .args([
-                "list-windows",
-                "-t",
-                session,
-                "-F",
-                "#{window_name}\t#{window_active}\t#{pane_dead}",
-            ])
-            .output()
-            .context("failed to run 'tmux list-windows'")?;
-        if !output.status.success() {
+    fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
+        // If the server isn't up there are no workspaces — an empty brigade,
+        // not an error (mirrors the old backend's tolerance of a missing session).
+        if !self.server_running()? {
             return Ok(Vec::new());
         }
-        let windows = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| {
-                let mut fields = line.splitn(3, '\t');
-                let name = fields.next()?.to_string();
-                if name.is_empty() {
-                    return None;
-                }
-                let active = fields.next() == Some("1");
-                let dead = fields.next() == Some("1");
-                Some(WindowInfo { name, active, dead })
+        let stdout = self.run_json(&["workspace", "list"])?;
+        let env: ListEnvelope = serde_json::from_str(&stdout)
+            .with_context(|| format!("failed to parse 'herdr workspace list' output: {stdout}"))?;
+        Ok(env
+            .result
+            .workspaces
+            .into_iter()
+            .map(|w| WorkspaceInfo {
+                workspace_id: w.workspace_id,
+                label: w.label,
+                agent_status: w.agent_status,
             })
-            .collect();
-        Ok(windows)
+            .collect())
     }
 
-    fn kill_window(&self, session: &str, window: &str) -> Result<()> {
-        let id = target(session, window);
+    fn close_workspace(&self, workspace_id: &str) -> Result<()> {
         let output = self
             .cmd()
-            .args(["kill-window", "-t", &id])
+            .args(["workspace", "close", workspace_id])
             .output()
-            .context("failed to run 'tmux kill-window'")?;
+            .context("failed to run 'herdr workspace close'")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // A window that's already gone is not an error for teardown.
-            if stderr.contains("can't find") || stderr.contains("no such") {
+            // A workspace that's already gone is not an error for teardown.
+            let s = stderr.to_lowercase();
+            if s.contains("not found") || s.contains("no such") || s.contains("unknown") {
                 return Ok(());
             }
-            bail!("tmux kill-window failed for '{}': {}", id, stderr.trim());
+            bail!(
+                "herdr workspace close failed for '{workspace_id}': {}",
+                stderr.trim()
+            );
         }
         Ok(())
     }
 
-    fn attach(&self, session: &str, window: Option<&str>) -> Result<()> {
-        // Attach to the brigade session, selecting a specific window if asked;
-        // otherwise land on the session's active window (window 0 / head chef on
-        // a fresh session, or wherever the last client left off).
-        match window {
-            Some(w) => self.attach_target(&target(session, w)),
-            None => self.attach_target(session),
+    fn attach(&self, workspace_id: Option<&str>) -> Result<()> {
+        // Focus the requested workspace first (best-effort) so the TUI lands
+        // there, then hand the terminal to herdr's native UI. Bare
+        // `herdr --session <name>` attaches/launches the TUI, inheriting stdio.
+        if let Some(ws) = workspace_id {
+            let _ = self.cmd().args(["workspace", "focus", ws]).status();
         }
+        let status = self
+            .cmd()
+            .status()
+            .context("failed to run 'herdr' (attach TUI)")?;
+        if !status.success() {
+            bail!("herdr attach exited with failure");
+        }
+        Ok(())
     }
 }
 

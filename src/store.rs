@@ -5,16 +5,22 @@ pub struct Store {
     conn: Connection,
 }
 
-/// A registered ticket: a worktree + its tmux session + the agent launched in it.
+/// A registered ticket: a worktree + its herdr workspace + the agent launched in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TicketRow {
     pub project: String,
     pub branch: String,
     pub sanitized: String,
-    pub window: String,
+    /// The herdr workspace id backing this ticket (empty until first spawn).
+    /// yeschef addresses the ticket in herdr by this id — matching it against
+    /// `herdr workspace list` is how liveness (running vs. gone) is determined.
+    pub workspace_id: String,
+    /// The id of the workspace's root pane, where the agent runs — the target
+    /// for send (`pane run`) and peek (`pane read`).
+    pub pane_id: String,
     pub agent: String,
     /// Self-reported task status (`NEW`/`IN_PROGRESS`/`DONE`/`BLOCKED`),
-    /// orthogonal to tmux window liveness.
+    /// orthogonal to herdr's live agent-status detection.
     pub status: String,
 }
 
@@ -44,7 +50,7 @@ impl Store {
             .context("failed to set WAL mode")?;
 
         // `branches` is the ticket registry: one row per worktree, recording the
-        // window (its backing tmux session) and the agent command launched in it.
+        // herdr workspace/pane backing it and the agent command launched in it.
         self.conn
             .execute_batch(
                 "
@@ -56,7 +62,8 @@ impl Store {
                     project TEXT NOT NULL REFERENCES projects(name),
                     branch TEXT NOT NULL,
                     sanitized TEXT NOT NULL,
-                    window TEXT NOT NULL DEFAULT '',
+                    workspace_id TEXT NOT NULL DEFAULT '',
+                    pane_id TEXT NOT NULL DEFAULT '',
                     agent TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'NEW',
                     PRIMARY KEY (project, branch)
@@ -65,11 +72,13 @@ impl Store {
             )
             .context("failed to initialize schema")?;
 
-        // Migrate older DBs (pre-orchestration schema) that lack window/agent.
+        // Migrate older DBs that lack the herdr id / agent / status columns.
         // `ALTER TABLE ADD COLUMN` errors with "duplicate column" if present —
-        // tolerate that so init stays idempotent.
+        // tolerate that so init stays idempotent. (A pre-herdr DB's now-unused
+        // `window` column is simply left orphaned; nothing reads it.)
         for stmt in [
-            "ALTER TABLE branches ADD COLUMN window TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE branches ADD COLUMN workspace_id TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE branches ADD COLUMN pane_id TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE branches ADD COLUMN agent TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE branches ADD COLUMN status TEXT NOT NULL DEFAULT 'NEW'",
         ] {
@@ -142,28 +151,30 @@ impl Store {
         Ok(())
     }
 
-    /// Register (or update) a ticket: a worktree + its tmux session + agent.
+    /// Register (or update) a ticket: a worktree + its herdr workspace/pane + agent.
     pub fn register_ticket(
         &self,
         project: &str,
         branch: &str,
         sanitized: &str,
-        window: &str,
+        workspace_id: &str,
+        pane_id: &str,
         agent: &str,
     ) -> Result<()> {
         // Upsert rather than INSERT OR REPLACE: a re-spawn (the supported
-        // "resume" path) must refresh window/agent/sanitized but LEAVE the
-        // self-reported `status` intact. A brand-new ticket takes the 'NEW'
+        // "resume" path) must refresh workspace/pane/agent/sanitized but LEAVE
+        // the self-reported `status` intact. A brand-new ticket takes the 'NEW'
         // column default.
         self.conn
             .execute(
-                "INSERT INTO branches (project, branch, sanitized, window, agent)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO branches (project, branch, sanitized, workspace_id, pane_id, agent)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(project, branch) DO UPDATE SET
                      sanitized = excluded.sanitized,
-                     window = excluded.window,
+                     workspace_id = excluded.workspace_id,
+                     pane_id = excluded.pane_id,
                      agent = excluded.agent",
-                params![project, branch, sanitized, window, agent],
+                params![project, branch, sanitized, workspace_id, pane_id, agent],
             )
             .with_context(|| format!("failed to register ticket '{project}/{branch}'"))?;
         Ok(())
@@ -190,7 +201,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT project, branch, sanitized, window, agent, status
+                "SELECT project, branch, sanitized, workspace_id, pane_id, agent, status
                  FROM branches WHERE project = ?1 AND branch = ?2",
             )
             .context("failed to prepare ticket lookup")?;
@@ -208,7 +219,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT project, branch, sanitized, window, agent, status
+                "SELECT project, branch, sanitized, workspace_id, pane_id, agent, status
                  FROM branches ORDER BY project, branch",
             )
             .context("failed to prepare ticket list")?;
@@ -239,9 +250,10 @@ fn row_to_ticket(row: &rusqlite::Row) -> rusqlite::Result<TicketRow> {
         project: row.get(0)?,
         branch: row.get(1)?,
         sanitized: row.get(2)?,
-        window: row.get(3)?,
-        agent: row.get(4)?,
-        status: row.get(5)?,
+        workspace_id: row.get(3)?,
+        pane_id: row.get(4)?,
+        agent: row.get(5)?,
+        status: row.get(6)?,
     })
 }
 
@@ -281,7 +293,8 @@ mod tests {
             "myproject",
             "feature/foo",
             "feature-foo",
-            "myproject-feature-foo",
+            "w1",
+            "w1:p1",
             "claude",
         )
         .unwrap();
@@ -290,7 +303,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(ticket.sanitized, "feature-foo");
-        assert_eq!(ticket.window, "myproject-feature-foo");
+        assert_eq!(ticket.workspace_id, "w1");
+        assert_eq!(ticket.pane_id, "w1:p1");
         assert_eq!(ticket.agent, "claude");
         // A brand-new ticket starts at the 'NEW' default.
         assert_eq!(ticket.status, "NEW");
@@ -300,7 +314,8 @@ mod tests {
     fn set_ticket_status_updates_status() {
         let s = store();
         s.add_project("p", "https://example.com/p.git").unwrap();
-        s.register_ticket("p", "a", "a", "p-a", "claude").unwrap();
+        s.register_ticket("p", "a", "a", "w1", "w1:p1", "claude")
+            .unwrap();
         s.set_ticket_status("p", "a", "BLOCKED").unwrap();
         let ticket = s.lookup_ticket("p", "a").unwrap().unwrap();
         assert_eq!(ticket.status, "BLOCKED");
@@ -320,13 +335,16 @@ mod tests {
     fn reregister_preserves_status() {
         let s = store();
         s.add_project("p", "https://example.com/p.git").unwrap();
-        s.register_ticket("p", "a", "a", "p-a", "claude").unwrap();
+        s.register_ticket("p", "a", "a", "w1", "w1:p1", "claude")
+            .unwrap();
         s.set_ticket_status("p", "a", "IN_PROGRESS").unwrap();
 
-        // Re-spawn: window/agent change, but the reported status survives.
-        s.register_ticket("p", "a", "a", "p-a", "codex").unwrap();
+        // Re-spawn: workspace/pane/agent change, but the reported status survives.
+        s.register_ticket("p", "a", "a", "w2", "w2:p1", "codex")
+            .unwrap();
         let ticket = s.lookup_ticket("p", "a").unwrap().unwrap();
         assert_eq!(ticket.agent, "codex");
+        assert_eq!(ticket.workspace_id, "w2");
         assert_eq!(ticket.status, "IN_PROGRESS");
     }
 
@@ -342,8 +360,10 @@ mod tests {
     fn list_and_remove_tickets() {
         let s = store();
         s.add_project("p", "https://example.com/p.git").unwrap();
-        s.register_ticket("p", "a", "a", "p-a", "claude").unwrap();
-        s.register_ticket("p", "b", "b", "p-b", "codex").unwrap();
+        s.register_ticket("p", "a", "a", "w1", "w1:p1", "claude")
+            .unwrap();
+        s.register_ticket("p", "b", "b", "w2", "w2:p1", "codex")
+            .unwrap();
         assert_eq!(s.list_tickets().unwrap().len(), 2);
         s.remove_ticket("p", "a").unwrap();
         let tickets = s.list_tickets().unwrap();

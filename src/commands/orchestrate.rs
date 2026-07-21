@@ -5,13 +5,13 @@ use anyhow::{anyhow, bail, Context, Result};
 use crate::cli::TaskStatus;
 use crate::config::Config;
 use crate::guard::RollbackGuard;
-use crate::names::{headchef_window, sanitize_branch, window_name, yeschef_session};
+use crate::names::{headchef_label, sanitize_branch, workspace_label};
 use crate::store::TicketRow;
 
 /// Default number of pane lines `peek` returns.
 const PEEK_LINES: usize = 40;
 
-/// Wrap a string in single quotes for safe inclusion in a `sh -lc` command,
+/// Wrap a string in single quotes for safe inclusion in a shell command line,
 /// escaping any embedded single quotes.
 fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -63,31 +63,42 @@ fn require_ticket(config: &Config, project: &str, branch: &str) -> Result<Ticket
     })
 }
 
-/// Ensure the brigade tmux session exists with the pinned head chef as window 0.
-/// Called before adding a cook window (`spawn`) and before opening the TUI, so
-/// the head chef is always present and reachable. Idempotent — an existing
-/// session (and its head chef) is left untouched.
+/// Ensure the brigade's herdr server is up and the pinned head chef exists.
+/// Called before adding a cook (`spawn`) and before opening the TUI, so the head
+/// chef is always present and reachable. Idempotent: an already-running server
+/// is left alone, and the head-chef workspace is only created if absent (matched
+/// by its label), so it is never restarted or duplicated.
 ///
 /// The head chef runs in the yeschef source checkout (`resolve_src_dir`); if
 /// that can't be resolved or doesn't exist we fall back to the yeschef home so
-/// tmux always gets a valid start directory. Tagging window 0's `@status` as
-/// `CHEF` is what colours it in the tab bar.
-fn ensure_brigade_session(config: &Config) -> Result<()> {
-    let session = yeschef_session();
-    let cwd = crate::config::resolve_src_dir()
-        .ok()
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| config.home.clone());
-    let command = crate::config::resolve_headchef_command();
+/// herdr always gets a valid start directory.
+fn ensure_brigade(config: &Config) -> Result<()> {
     config
-        .tmux
-        .ensure_session(session, headchef_window(), &cwd, &command)
-        .context("failed to ensure the yeschef brigade session")?;
-    // Best-effort: tag the head chef so the tab bar shows it distinctly. A
-    // failure here shouldn't block spawning or attaching.
-    let _ = config
-        .tmux
-        .set_window_status(session, headchef_window(), "CHEF");
+        .herdr
+        .ensure_server()
+        .context("failed to ensure the herdr brigade server")?;
+
+    let head_label = headchef_label();
+    let head_present = config
+        .herdr
+        .list_workspaces()?
+        .iter()
+        .any(|w| w.label == head_label);
+    if !head_present {
+        let cwd = crate::config::resolve_src_dir()
+            .ok()
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| config.home.clone());
+        let ws = config
+            .herdr
+            .create_workspace(head_label, &cwd)
+            .context("failed to create the head chef workspace")?;
+        let command = crate::config::resolve_headchef_command();
+        config
+            .herdr
+            .run_in_pane(&ws.pane_id, &command)
+            .context("failed to launch the head chef")?;
+    }
     Ok(())
 }
 
@@ -108,18 +119,25 @@ pub fn run_spawn(
     }
 
     let sanitized = sanitize_branch(branch);
-    let session = yeschef_session();
-    let window = window_name(project, &sanitized);
+    let label = workspace_label(project, branch);
     let bare_dir = config.bare_repo_dir(project);
     let worktree_path = config.worktree_dir(project, branch);
 
-    // Ensure the brigade session (head chef at window 0) exists, then refuse to
-    // clobber a ticket that's already running in a live window.
-    ensure_brigade_session(config)?;
-    if config.tmux.window_exists(session, &window)? {
-        bail!(
-            "a window for '{project}/{branch}' already exists; use 'yeschef send/peek {project} {branch}' or 'yeschef kill {project} {branch}' first"
-        );
+    // Ensure the brigade (server + head chef) exists, then refuse to clobber a
+    // ticket that already has a live workspace.
+    ensure_brigade(config)?;
+    if let Some(existing) = config.store.lookup_ticket(project, branch)? {
+        if !existing.workspace_id.is_empty()
+            && config
+                .herdr
+                .list_workspaces()?
+                .iter()
+                .any(|w| w.workspace_id == existing.workspace_id)
+        {
+            bail!(
+                "a workspace for '{project}/{branch}' already exists; use 'yeschef send/peek {project} {branch}' or 'yeschef kill {project} {branch}' first"
+            );
+        }
     }
 
     let mut guard = RollbackGuard::new();
@@ -163,7 +181,8 @@ pub fn run_spawn(
             .context("failed to unset extensions.relativeWorktrees on bare repo")?;
     }
 
-    // 2. Launch the agent in a fresh tmux session rooted at the worktree.
+    // 2. Create the herdr workspace rooted at the worktree, then launch the
+    // agent into its root pane.
     //
     // The prompt is never passed inline: a long prompt (a few paragraphs) blows
     // past the OS arg-length limit and the agent harness, treating the giant
@@ -187,20 +206,41 @@ pub fn run_spawn(
         prompt_path.display()
     );
     let command = format!("{agent} {}", shell_single_quote(&instruction));
-    config
-        .tmux
-        .new_window(session, &window, &worktree_path, &command)
-        .with_context(|| format!("failed to create tmux session '{session}-{window}'"))?;
 
-    // 3. Register the ticket.
-    config
-        .store
-        .register_ticket(project, branch, &sanitized, &window, agent)
-        .with_context(|| format!("failed to register ticket '{project}/{branch}'"))?;
+    let ws = config
+        .herdr
+        .create_workspace(&label, &worktree_path)
+        .with_context(|| format!("failed to create herdr workspace for '{project}/{branch}'"))?;
+
+    // 3. Launch the agent + register the ticket. If either fails, tear the
+    // freshly-created workspace back down so a retry is clean (the guard still
+    // rolls back the worktree).
+    let launch_and_register = (|| -> Result<()> {
+        config
+            .herdr
+            .run_in_pane(&ws.pane_id, &command)
+            .with_context(|| format!("failed to launch agent for '{project}/{branch}'"))?;
+        config
+            .store
+            .register_ticket(
+                project,
+                branch,
+                &sanitized,
+                &ws.workspace_id,
+                &ws.pane_id,
+                agent,
+            )
+            .with_context(|| format!("failed to register ticket '{project}/{branch}'"))?;
+        Ok(())
+    })();
+    if let Err(e) = launch_and_register {
+        let _ = config.herdr.close_workspace(&ws.workspace_id);
+        return Err(e);
+    }
 
     guard.commit();
 
-    println!("spawned '{project}/{branch}' → agent '{agent}' in window '{window}'");
+    println!("spawned '{project}/{branch}' → agent '{agent}' in workspace '{label}'");
     println!("  peek:   yeschef peek {project} {branch}");
     println!("  steer:  yeschef send {project} {branch} \"<instruction>\"");
     Ok(())
@@ -213,9 +253,9 @@ pub fn run_spawn(
 pub fn run_send(config: &Config, project: &str, branch: &str, text: &str) -> Result<()> {
     let ticket = require_ticket(config, project, branch)?;
     config
-        .tmux
-        .send_keys(yeschef_session(), &ticket.window, text)
-        .with_context(|| format!("failed to send keys to '{project}/{branch}'"))?;
+        .herdr
+        .run_in_pane(&ticket.pane_id, text)
+        .with_context(|| format!("failed to send to '{project}/{branch}'"))?;
     Ok(())
 }
 
@@ -226,13 +266,9 @@ pub fn run_send(config: &Config, project: &str, branch: &str, text: &str) -> Res
 pub fn run_peek(config: &Config, project: &str, branch: &str, lines: Option<usize>) -> Result<()> {
     let ticket = require_ticket(config, project, branch)?;
     let pane = config
-        .tmux
-        .capture_pane(
-            yeschef_session(),
-            &ticket.window,
-            Some(lines.unwrap_or(PEEK_LINES)),
-        )
-        .with_context(|| format!("failed to capture pane for '{project}/{branch}'"))?;
+        .herdr
+        .read_pane(&ticket.pane_id, Some(lines.unwrap_or(PEEK_LINES)))
+        .with_context(|| format!("failed to read pane for '{project}/{branch}'"))?;
     print!("{pane}");
     if !pane.ends_with('\n') {
         println!();
@@ -251,24 +287,32 @@ pub fn run_status(config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    let session = yeschef_session();
-    let windows = config.tmux.list_windows(session).unwrap_or_default();
+    // The brigade view joins the registry with herdr's live workspace list: a
+    // ticket whose workspace_id is present is live (STATE = herdr's detected
+    // agent status), one that's absent is "gone".
+    let workspaces = config.herdr.list_workspaces().unwrap_or_default();
 
     println!(
-        "{:<28} {:<10} {:<12} {:<12} LAST LINE",
+        "{:<32} {:<10} {:<12} {:<12} LAST LINE",
         "TICKET", "AGENT", "STATE", "STATUS"
     );
     for ticket in &tickets {
-        let info = windows.iter().find(|w| w.name == ticket.window);
-        let state = match info {
-            Some(w) if w.dead => "dead",
-            Some(_) => "running",
-            None => "gone",
+        let live = if ticket.workspace_id.is_empty() {
+            None
+        } else {
+            workspaces
+                .iter()
+                .find(|w| w.workspace_id == ticket.workspace_id)
         };
-        let last_line = if matches!(state, "running") {
+        let state = match live {
+            Some(w) if !w.agent_status.is_empty() => w.agent_status.clone(),
+            Some(_) => "idle".to_string(),
+            None => "gone".to_string(),
+        };
+        let last_line = if live.is_some() {
             config
-                .tmux
-                .capture_pane(session, &ticket.window, Some(5))
+                .herdr
+                .read_pane(&ticket.pane_id, Some(5))
                 .ok()
                 .and_then(|p| {
                     p.lines()
@@ -282,7 +326,7 @@ pub fn run_status(config: &Config) -> Result<()> {
         };
         let label = format!("{}/{}", ticket.project, ticket.branch);
         println!(
-            "{label:<28} {:<10} {state:<12} {:<12} {last_line}",
+            "{label:<32} {:<10} {state:<12} {:<12} {last_line}",
             ticket.agent, ticket.status
         );
     }
@@ -305,12 +349,16 @@ pub fn run_ticket_status_set(
         .store
         .set_ticket_status(project, branch, status.as_str())
         .with_context(|| format!("failed to set status for '{project}/{branch}'"))?;
-    // Push the new status into the cook's tmux window so the brigade tab bar
-    // recolours it live. Best-effort: the window may be gone (a finished cook),
-    // and a missing tab shouldn't fail the status write that just persisted.
-    let _ = config
-        .tmux
-        .set_window_status(yeschef_session(), &ticket.window, status.as_str());
+    // Best-effort: push the self-reported status into the cook's pane as
+    // display-only metadata so herdr's TUI can surface it. herdr detects live
+    // agent activity on its own; this is the higher-level task status. A missing
+    // workspace (a finished cook) shouldn't fail the status write that just
+    // persisted to the store.
+    if !ticket.pane_id.is_empty() {
+        let _ = config
+            .herdr
+            .set_display_status(&ticket.pane_id, status.as_str());
+    }
     println!("status of '{project}/{branch}' set to {}", status.as_str());
     Ok(())
 }
@@ -321,12 +369,16 @@ pub fn run_ticket_status_set(
 
 pub fn run_kill(config: &Config, project: &str, branch: &str, rm_worktree: bool) -> Result<()> {
     let ticket = require_ticket(config, project, branch)?;
-    let session = yeschef_session();
 
-    config
-        .tmux
-        .kill_window(session, &ticket.window)
-        .with_context(|| format!("failed to kill window for '{project}/{branch}'"))?;
+    // Close the herdr workspace. `close_workspace` is idempotent — a workspace
+    // that's already gone (or a server that's down) is not an error — so this is
+    // safe whether or not the cook is still live.
+    if !ticket.workspace_id.is_empty() {
+        config
+            .herdr
+            .close_workspace(&ticket.workspace_id)
+            .with_context(|| format!("failed to close workspace for '{project}/{branch}'"))?;
+    }
 
     if rm_worktree {
         let bare_dir = config.bare_repo_dir(project);
@@ -355,22 +407,24 @@ pub fn run_kill(config: &Config, project: &str, branch: &str, rm_worktree: bool)
 // ---------------------------------------------------------------------------
 
 pub fn run_attach(config: &Config, project: Option<&str>, branch: Option<&str>) -> Result<()> {
-    let session = yeschef_session();
-    if !config.tmux.session_exists(session)? {
+    if !config.herdr.server_running()? {
         bail!(
-            "no yeschef session yet; spawn a ticket first with 'yeschef spawn <project> <branch>'"
+            "no yeschef brigade yet; spawn a ticket first with 'yeschef spawn <project> <branch>'"
         );
     }
 
-    let window = match (project, branch) {
-        (Some(p), Some(b)) => Some(require_ticket(config, p, b)?.window),
+    let workspace = match (project, branch) {
+        (Some(p), Some(b)) => {
+            let id = require_ticket(config, p, b)?.workspace_id;
+            (!id.is_empty()).then_some(id)
+        }
         _ => None,
     };
 
     config
-        .tmux
-        .attach(session, window.as_deref())
-        .context("failed to attach to yeschef session")?;
+        .herdr
+        .attach(workspace.as_deref())
+        .context("failed to attach to the herdr brigade")?;
     Ok(())
 }
 
@@ -378,18 +432,17 @@ pub fn run_attach(config: &Config, project: Option<&str>, branch: Option<&str>) 
 // tui
 // ---------------------------------------------------------------------------
 
-/// `yeschef tui`: the native tmux UI. There is no custom rendering — we ensure
-/// the brigade session (head chef pinned at window 0) exists and hand the
-/// terminal to tmux. tmux's own status line shows every cook as a colour-coded
-/// tab (see `tmux.conf`'s `window-status-format`); `prefix+n`/`p`/`<n>` and
-/// `prefix+w` switch between cooks, `prefix+0` jumps back to the head chef, and
-/// `prefix+d` detaches cleanly back to the shell.
+/// `yeschef tui`: hand the terminal to herdr's native UI. There is no custom
+/// rendering — we ensure the brigade (server + pinned head chef) exists and then
+/// `herdr` attaches, showing every workspace as a live, status-coloured entry in
+/// its sidebar. The human switches workspaces, jumps to the head chef, and
+/// detaches with herdr's own keybindings.
 pub fn run_tui(config: &Config) -> Result<()> {
-    ensure_brigade_session(config)?;
+    ensure_brigade(config)?;
     config
-        .tmux
-        .attach(yeschef_session(), None)
-        .context("failed to attach to the yeschef session")?;
+        .herdr
+        .attach(None)
+        .context("failed to attach to the herdr brigade")?;
     Ok(())
 }
 
@@ -397,97 +450,35 @@ pub fn run_tui(config: &Config) -> Result<()> {
 // restart
 // ---------------------------------------------------------------------------
 
-/// Turn an agent command into the command used to *restart* it so it resumes
-/// its prior conversation rather than starting fresh. Only Claude Code takes
-/// `--continue` (reopen the most recent conversation in the pane's cwd), so we
-/// append it just for `claude`-family commands (`claude`, `claude --model …`).
-/// Any other agent (`codex`, `aider`, a test stand-in) is relaunched verbatim —
-/// a plain restart with no conversation-resume, which is the best we can do
-/// generically without breaking yeschef's agent-agnostic contract.
-fn resume_command(agent: &str) -> String {
-    if agent.split_whitespace().next() == Some("claude") {
-        format!("{agent} --continue")
-    } else {
-        agent.to_string()
-    }
-}
-
-/// `yeschef restart`: swap every running agent in the brigade — the head chef
-/// and every live line cook — for a fresh process, in place, resuming each
-/// one's prior conversation. This is the "I just updated Claude Code, pick up
-/// the new binary without losing context" button. Each window (its tab, colour,
-/// and worktree cwd) is preserved via `respawn_window`; only the process inside
-/// is replaced.
-///
-/// Cooks are restarted first and the head chef last. `restart` is normally run
-/// by the human from a plain shell outside the brigade, but if it's ever issued
-/// from the head chef's own window, respawning window 0 tears down the very
-/// process running this command — so doing the head chef last guarantees every
-/// cook is already back up before that can happen.
-///
-/// Only windows that are actually live are touched: a finished cook's window is
-/// already gone, and there's nothing to respawn. If no brigade session exists
-/// at all, there's nothing running to restart, so we say so rather than
-/// silently doing nothing.
+/// `yeschef restart`: restart the brigade's herdr server. herdr persists the
+/// session to disk, so stopping and restarting the server restores every
+/// workspace and — with `resume_agents_on_restore` (on by default) — resumes
+/// each supported agent's conversation via its native resume. This is the "I
+/// just updated Claude Code, pick up the new binary without losing context"
+/// button, done the herdr-native way (herdr owns the resume, so yeschef no
+/// longer special-cases `claude --continue`).
 pub fn run_restart(config: &Config) -> Result<()> {
-    let session = yeschef_session();
-    if !config.tmux.session_exists(session)? {
+    if !config.herdr.server_running()? {
         bail!(
-            "no yeschef session running; nothing to restart (spawn a ticket or open the tui first)"
+            "no yeschef brigade running; nothing to restart (spawn a ticket or open the tui first)"
         );
     }
-
-    // A respawn on a missing pane is an error, so intersect the registry with
-    // the windows tmux actually reports live before touching anything.
-    let live: std::collections::HashSet<String> = config
-        .tmux
-        .list_windows(session)?
-        .into_iter()
-        .map(|w| w.name)
-        .collect();
-
-    let mut restarted = 0usize;
-    for ticket in config.store.list_tickets()? {
-        if !live.contains(&ticket.window) {
-            continue;
-        }
-        let cwd = config.worktree_dir(&ticket.project, &ticket.branch);
-        let command = resume_command(&ticket.agent);
-        config
-            .tmux
-            .respawn_window(session, &ticket.window, &cwd, &command)
-            .with_context(|| format!("failed to restart '{}/{}'", ticket.project, ticket.branch))?;
-        restarted += 1;
-        println!("restarted '{}/{}'", ticket.project, ticket.branch);
-    }
-
-    // Head chef last (see the doc comment) — and only if its window is live.
-    let head_restarted = if live.contains(headchef_window()) {
-        let cwd = crate::config::resolve_src_dir()
-            .ok()
-            .filter(|p| p.exists())
-            .unwrap_or_else(|| config.home.clone());
-        let command = resume_command(&crate::config::resolve_headchef_command());
-        config
-            .tmux
-            .respawn_window(session, headchef_window(), &cwd, &command)
-            .context("failed to restart the head chef")?;
-        println!("restarted the head chef");
-        true
-    } else {
-        false
-    };
-
-    let chef = if head_restarted { " + head chef" } else { "" };
-    println!("restart complete ({restarted} cook(s){chef})");
+    config
+        .herdr
+        .stop_server()
+        .context("failed to stop the herdr brigade server")?;
+    config
+        .herdr
+        .ensure_server()
+        .context("failed to bring the herdr brigade server back up")?;
+    println!("restarted the herdr brigade (workspaces restored; supported agents resumed)");
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::mock::{MockGitBackend, MockTmuxBackend};
-    use crate::backend::TmuxBackend;
+    use crate::backend::mock::{MockGitBackend, MockHerdrBackend};
     use crate::store::Store;
     use tempfile::TempDir;
 
@@ -497,12 +488,12 @@ mod tests {
     /// through them. Keep `_tmp` alive for the duration of the test.
     struct Harness {
         config: Config,
-        tmux: MockTmuxBackend,
+        herdr: MockHerdrBackend,
         git: MockGitBackend,
         _tmp: TempDir,
     }
 
-    fn harness(tmux: MockTmuxBackend) -> Harness {
+    fn harness(herdr: MockHerdrBackend) -> Harness {
         let tmp = TempDir::new().unwrap();
         let store = Store::open_in_memory().unwrap();
         store
@@ -513,14 +504,24 @@ mod tests {
             home: tmp.path().to_path_buf(),
             store,
             git: Box::new(git.clone()),
-            tmux: Box::new(tmux.clone()),
+            herdr: Box::new(herdr.clone()),
         };
         Harness {
             config,
-            tmux,
+            herdr,
             git,
             _tmp: tmp,
         }
+    }
+
+    /// The pane id herdr minted for a ticket, read back from the store.
+    fn ticket_pane(h: &Harness, project: &str, branch: &str) -> String {
+        h.config
+            .store
+            .lookup_ticket(project, branch)
+            .unwrap()
+            .unwrap()
+            .pane_id
     }
 
     #[test]
@@ -530,8 +531,8 @@ mod tests {
     }
 
     #[test]
-    fn spawn_creates_window_and_registers_ticket() {
-        let h = harness(MockTmuxBackend::new());
+    fn spawn_creates_workspace_and_registers_ticket() {
+        let h = harness(MockHerdrBackend::new());
         run_spawn(
             &h.config,
             "proj",
@@ -542,23 +543,33 @@ mod tests {
         )
         .unwrap();
 
-        // Ticket is registered with the derived window name.
+        // Ticket is registered with the herdr ids and agent.
         let ticket = h
             .config
             .store
             .lookup_ticket("proj", "feature/x")
             .unwrap()
             .unwrap();
-        assert_eq!(ticket.window, "proj-feature-x");
+        assert!(!ticket.workspace_id.is_empty());
+        assert!(!ticket.pane_id.is_empty());
         assert_eq!(ticket.agent, "claude");
 
-        // The window launches the agent with a short "read this file"
-        // instruction rather than the prompt inlined on the command line.
-        let calls = h.tmux.recorded_calls();
+        // The cook workspace is created with the human-facing project/branch label.
+        let calls = h.herdr.recorded_calls();
         assert!(
             calls
                 .iter()
-                .any(|c| c.starts_with("new_window:yeschef:proj-feature-x:")
+                .any(|c| c.starts_with("create_workspace:proj/feature/x:")),
+            "calls: {calls:?}"
+        );
+
+        // The agent launches via a short "read this file" instruction typed into
+        // its pane rather than the prompt inlined.
+        let pane = ticket.pane_id;
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with(&format!("run_in_pane:{pane}:"))
                     && c.contains("claude 'Read the ticket brief at ")
                     && c.contains("carry it out start to finish.'")),
             "calls: {calls:?}"
@@ -567,7 +578,7 @@ mod tests {
 
     #[test]
     fn spawn_writes_long_prompt_to_file_not_inline() {
-        let h = harness(MockTmuxBackend::new());
+        let h = harness(MockHerdrBackend::new());
         // A multi-paragraph prompt that would overflow the arg-length limit if
         // passed inline (the ENAMETOOLONG bug this guards against).
         let long_prompt = "Refactor the widget subsystem.\n\n".repeat(500);
@@ -581,11 +592,12 @@ mod tests {
         )
         .unwrap();
 
-        let calls = h.tmux.recorded_calls();
+        let pane = ticket_pane(&h, "proj", "feature/x");
+        let calls = h.herdr.recorded_calls();
         let launch = calls
             .iter()
-            .find(|c| c.starts_with("new_window:yeschef:proj-feature-x:"))
-            .expect("expected a new_window call");
+            .find(|c| c.starts_with(&format!("run_in_pane:{pane}:")))
+            .expect("expected a run_in_pane launch call");
 
         // The raw prompt must NOT appear inline on the launched command.
         assert!(
@@ -606,8 +618,6 @@ mod tests {
             "prompt file must live outside the worktree: {}",
             prompt_path.display()
         );
-        // The full prompt is present in the file verbatim (now preceded by the
-        // status-protocol preamble, separated by a horizontal rule).
         let written = std::fs::read_to_string(&prompt_path).unwrap();
         assert!(
             written.contains(&long_prompt),
@@ -625,7 +635,7 @@ mod tests {
 
     #[test]
     fn spawn_injects_status_protocol_even_without_prompt() {
-        let h = harness(MockTmuxBackend::new());
+        let h = harness(MockHerdrBackend::new());
         run_spawn(&h.config, "proj", "feature/x", None, "claude", None).unwrap();
 
         // Even with no -p prompt, a brief file is written carrying the protocol,
@@ -647,11 +657,12 @@ mod tests {
             "preamble must not reference the broken dotted ~/.yeschef/yeschef-src path: {written}"
         );
 
-        let calls = h.tmux.recorded_calls();
+        let pane = ticket_pane(&h, "proj", "feature/x");
+        let calls = h.herdr.recorded_calls();
         assert!(
             calls
                 .iter()
-                .any(|c| c.starts_with("new_window:yeschef:proj-feature-x:")
+                .any(|c| c.starts_with(&format!("run_in_pane:{pane}:"))
                     && c.contains("claude 'Read the ticket brief at ")),
             "calls: {calls:?}"
         );
@@ -659,7 +670,7 @@ mod tests {
 
     #[test]
     fn ticket_status_set_persists_and_requires_ticket() {
-        let h = harness(MockTmuxBackend::new());
+        let h = harness(MockHerdrBackend::new());
         run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap();
 
         run_ticket_status_set(&h.config, "proj", "x", TaskStatus::Blocked).unwrap();
@@ -672,73 +683,87 @@ mod tests {
     }
 
     #[test]
-    fn status_set_pushes_into_the_tmux_tab_bar() {
-        // The whole point of the native TUI: a status-set updates the cook's
-        // `@status` tmux option so the tab bar recolours it live.
-        let h = harness(MockTmuxBackend::new());
+    fn status_set_pushes_display_metadata_to_the_pane() {
+        // The self-reported task status is pushed to the cook's pane as
+        // display-only metadata so herdr's TUI can surface it.
+        let h = harness(MockHerdrBackend::new());
         run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap();
+        let pane = ticket_pane(&h, "proj", "x");
 
         run_ticket_status_set(&h.config, "proj", "x", TaskStatus::InProgress).unwrap();
 
-        let calls = h.tmux.recorded_calls();
+        let calls = h.herdr.recorded_calls();
         assert!(
-            calls.contains(&"set_window_status:yeschef:proj-x:IN_PROGRESS".to_string()),
-            "status-set must push @status into the cook's window; calls: {calls:?}"
+            calls.contains(&format!("set_display_status:{pane}:IN_PROGRESS")),
+            "status-set must push display metadata into the pane; calls: {calls:?}"
         );
         assert_eq!(
-            h.tmux.window_status("yeschef", "proj-x").as_deref(),
+            h.herdr.display_status(&pane).as_deref(),
             Some("IN_PROGRESS")
         );
     }
 
     #[test]
-    fn spawn_ensures_brigade_session_with_pinned_head_chef() {
-        let h = harness(MockTmuxBackend::new());
+    fn spawn_ensures_brigade_with_head_chef() {
+        let h = harness(MockHerdrBackend::new());
         run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap();
 
-        // The brigade session is ensured with the head chef as window 0, tagged
-        // CHEF so the tab bar shows it distinctly.
-        let calls = h.tmux.recorded_calls();
+        let calls = h.herdr.recorded_calls();
+        // The brigade server is ensured...
         assert!(
-            calls
-                .iter()
-                .any(|c| c.starts_with("ensure_session:yeschef:headchef:")),
-            "spawn must ensure the brigade session with the head chef; calls: {calls:?}"
+            calls.contains(&"ensure_server".to_string()),
+            "spawn must ensure the herdr server; calls: {calls:?}"
         );
+        // ...and the head chef workspace is created (before the cook's).
+        let headchef_idx = calls
+            .iter()
+            .position(|c| c.starts_with("create_workspace:headchef:"))
+            .expect("head chef workspace must be created");
+        let cook_idx = calls
+            .iter()
+            .position(|c| c.starts_with("create_workspace:proj/x:"))
+            .expect("cook workspace must be created");
         assert!(
-            calls.contains(&"set_window_status:yeschef:headchef:CHEF".to_string()),
-            "the head chef window must be tagged CHEF; calls: {calls:?}"
+            headchef_idx < cook_idx,
+            "head chef must be ensured before the cook; calls: {calls:?}"
         );
-        // The cook is a window in the same session, added after the ensure.
-        assert!(
-            calls
-                .iter()
-                .any(|c| c.starts_with("new_window:yeschef:proj-x:")),
-            "the cook must be a window in the brigade session; calls: {calls:?}"
-        );
+    }
+
+    #[test]
+    fn ensure_brigade_is_idempotent_for_the_head_chef() {
+        // A second spawn must not create a second head chef workspace.
+        let h = harness(MockHerdrBackend::new());
+        run_spawn(&h.config, "proj", "a", None, "claude", None).unwrap();
+        run_spawn(&h.config, "proj", "b", None, "claude", None).unwrap();
+
+        let head_creates = h
+            .herdr
+            .recorded_calls()
+            .iter()
+            .filter(|c| c.starts_with("create_workspace:headchef:"))
+            .count();
+        assert_eq!(head_creates, 1, "head chef must be created exactly once");
     }
 
     #[test]
     fn tui_ensures_the_brigade_and_attaches() {
-        let h = harness(MockTmuxBackend::new());
+        let h = harness(MockHerdrBackend::new());
         run_tui(&h.config).unwrap();
 
-        let calls = h.tmux.recorded_calls();
+        let calls = h.herdr.recorded_calls();
         assert!(
-            calls
-                .iter()
-                .any(|c| c.starts_with("ensure_session:yeschef:headchef:")),
-            "tui must ensure the brigade session; calls: {calls:?}"
+            calls.contains(&"ensure_server".to_string()),
+            "tui must ensure the brigade server; calls: {calls:?}"
         );
         assert!(
-            calls.contains(&"attach:yeschef:-".to_string()),
-            "tui must attach to the whole session (no specific window); calls: {calls:?}"
+            calls.contains(&"attach:-".to_string()),
+            "tui must attach to the whole brigade (no specific workspace); calls: {calls:?}"
         );
     }
 
     #[test]
-    fn spawn_refuses_duplicate_window() {
-        let h = harness(MockTmuxBackend::new());
+    fn spawn_refuses_duplicate_live_workspace() {
+        let h = harness(MockHerdrBackend::new());
         run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap();
         let err = run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap_err();
         assert!(err.to_string().contains("already exists"), "{err}");
@@ -746,53 +771,69 @@ mod tests {
 
     #[test]
     fn spawn_unknown_project_errors() {
-        let h = harness(MockTmuxBackend::new());
+        let h = harness(MockHerdrBackend::new());
         let err = run_spawn(&h.config, "nope", "x", None, "claude", None).unwrap_err();
         assert!(err.to_string().contains("not found"), "{err}");
     }
 
     #[test]
-    fn send_targets_the_ticket_window() {
-        let h = harness(MockTmuxBackend::new());
+    fn send_targets_the_ticket_pane() {
+        let h = harness(MockHerdrBackend::new());
         run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap();
+        let pane = ticket_pane(&h, "proj", "x");
         run_send(&h.config, "proj", "x", "run tests").unwrap();
-        let calls = h.tmux.recorded_calls();
+        let calls = h.herdr.recorded_calls();
         assert!(
-            calls.contains(&"send_keys:yeschef:proj-x:run tests".to_string()),
+            calls.contains(&format!("run_in_pane:{pane}:run tests")),
             "calls: {calls:?}"
         );
     }
 
     #[test]
     fn send_unknown_ticket_errors() {
-        let h = harness(MockTmuxBackend::new());
+        let h = harness(MockHerdrBackend::new());
         let err = run_send(&h.config, "proj", "ghost", "hi").unwrap_err();
         assert!(err.to_string().contains("no ticket"), "{err}");
     }
 
     #[test]
     fn peek_returns_pane_content() {
-        let tmux = MockTmuxBackend::new().with_pane("yeschef", "proj-x", "hello from agent\n");
-        let h = harness(tmux);
+        let h = harness(MockHerdrBackend::new());
         run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap();
+        let pane = ticket_pane(&h, "proj", "x");
+        // Seed the pane's readable content now that we know its minted id.
+        h.herdr
+            .pane_contents
+            .lock()
+            .unwrap()
+            .insert(pane.clone(), "hello from agent\n".to_string());
+
         run_peek(&h.config, "proj", "x", Some(10)).unwrap();
-        let calls = h.tmux.recorded_calls();
+        let calls = h.herdr.recorded_calls();
         assert!(
-            calls.iter().any(|c| c == "capture_pane:yeschef:proj-x:10"),
+            calls.contains(&format!("read_pane:{pane}:10")),
             "calls: {calls:?}"
         );
     }
 
     #[test]
-    fn kill_removes_window_and_ticket() {
-        let h = harness(MockTmuxBackend::new());
+    fn kill_closes_workspace_and_removes_ticket() {
+        let h = harness(MockHerdrBackend::new());
         run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap();
+        let ws = h
+            .config
+            .store
+            .lookup_ticket("proj", "x")
+            .unwrap()
+            .unwrap()
+            .workspace_id;
+
         run_kill(&h.config, "proj", "x", false).unwrap();
         assert!(h.config.store.lookup_ticket("proj", "x").unwrap().is_none());
         assert!(h
-            .tmux
+            .herdr
             .recorded_calls()
-            .contains(&"kill_window:yeschef:proj-x".to_string()));
+            .contains(&format!("close_workspace:{ws}")));
         // Without --rm-worktree, the worktree is not removed.
         assert!(!h
             .git
@@ -803,7 +844,7 @@ mod tests {
 
     #[test]
     fn kill_with_rm_worktree_removes_worktree() {
-        let h = harness(MockTmuxBackend::new());
+        let h = harness(MockHerdrBackend::new());
         run_spawn(&h.config, "proj", "x", None, "claude", None).unwrap();
         run_kill(&h.config, "proj", "x", true).unwrap();
         assert!(h
@@ -814,118 +855,26 @@ mod tests {
     }
 
     #[test]
-    fn resume_command_appends_continue_only_for_claude() {
-        // Claude Code resumes its prior conversation with `--continue`; the flag
-        // is appended whatever else the claude command carries.
-        assert_eq!(resume_command("claude"), "claude --continue");
-        assert_eq!(
-            resume_command("claude --model opus"),
-            "claude --model opus --continue"
-        );
-        // Other agents have no portable resume flag, so they restart verbatim.
-        assert_eq!(resume_command("codex"), "codex");
-        assert_eq!(
-            resume_command("sh -c 'exec sleep 300'"),
-            "sh -c 'exec sleep 300'"
-        );
-    }
-
-    #[test]
-    fn restart_respawns_live_cooks_and_head_chef_resuming_conversation() {
-        let h = harness(MockTmuxBackend::new());
+    fn restart_bounces_the_server() {
+        let h = harness(MockHerdrBackend::new());
         run_spawn(&h.config, "proj", "a", None, "claude", None).unwrap();
-        run_spawn(&h.config, "proj", "b", None, "claude", None).unwrap();
 
         run_restart(&h.config).unwrap();
 
-        let calls = h.tmux.recorded_calls();
-        // Each live cook is respawned in place with `--continue` (resume).
+        let calls = h.herdr.recorded_calls();
+        let stop_idx = calls.iter().position(|c| c == "stop_server");
+        let ensure_after_stop =
+            stop_idx.is_some_and(|i| calls.iter().skip(i + 1).any(|c| c == "ensure_server"));
         assert!(
-            calls
-                .iter()
-                .any(|c| c.starts_with("respawn_window:yeschef:proj-a:")
-                    && c.ends_with(":claude --continue")),
-            "cook a must be respawned with --continue; calls: {calls:?}"
-        );
-        assert!(
-            calls
-                .iter()
-                .any(|c| c.starts_with("respawn_window:yeschef:proj-b:")
-                    && c.ends_with(":claude --continue")),
-            "cook b must be respawned with --continue; calls: {calls:?}"
-        );
-        // The head chef (window 0) is respawned too, also resuming.
-        assert!(
-            calls
-                .iter()
-                .any(|c| c.starts_with("respawn_window:yeschef:headchef:")
-                    && c.ends_with(":claude --continue")),
-            "head chef must be respawned with --continue; calls: {calls:?}"
+            stop_idx.is_some() && ensure_after_stop,
+            "restart must stop then re-ensure the server; calls: {calls:?}"
         );
     }
 
     #[test]
-    fn restart_does_the_head_chef_last() {
-        // If restart is run from the head chef's own window, respawning window 0
-        // kills the caller — so every cook must be respawned before the head
-        // chef is.
-        let h = harness(MockTmuxBackend::new());
-        run_spawn(&h.config, "proj", "a", None, "claude", None).unwrap();
-        run_spawn(&h.config, "proj", "b", None, "claude", None).unwrap();
-
-        run_restart(&h.config).unwrap();
-
-        let calls = h.tmux.recorded_calls();
-        let head_idx = calls
-            .iter()
-            .position(|c| c.starts_with("respawn_window:yeschef:headchef:"))
-            .expect("head chef respawn");
-        let last_cook_idx = calls
-            .iter()
-            .rposition(|c| {
-                c.starts_with("respawn_window:yeschef:proj-a:")
-                    || c.starts_with("respawn_window:yeschef:proj-b:")
-            })
-            .expect("cook respawn");
-        assert!(
-            head_idx > last_cook_idx,
-            "head chef must be respawned after all cooks; calls: {calls:?}"
-        );
-    }
-
-    #[test]
-    fn restart_skips_gone_cook_windows() {
-        // A cook whose window has closed (finished agent) is still registered,
-        // but there's no pane to respawn — restart must skip it rather than
-        // erroring on a missing target.
-        let h = harness(MockTmuxBackend::new());
-        run_spawn(&h.config, "proj", "live", None, "claude", None).unwrap();
-        run_spawn(&h.config, "proj", "gone", None, "claude", None).unwrap();
-        // Simulate the "gone" cook's window closing (agent exited) while its
-        // ticket stays in the registry.
-        h.tmux.kill_window("yeschef", "proj-gone").unwrap();
-
-        run_restart(&h.config).unwrap();
-
-        let calls = h.tmux.recorded_calls();
-        assert!(
-            calls
-                .iter()
-                .any(|c| c.starts_with("respawn_window:yeschef:proj-live:")),
-            "live cook must be respawned; calls: {calls:?}"
-        );
-        assert!(
-            !calls
-                .iter()
-                .any(|c| c.starts_with("respawn_window:yeschef:proj-gone:")),
-            "gone cook must NOT be respawned; calls: {calls:?}"
-        );
-    }
-
-    #[test]
-    fn restart_without_session_errors() {
-        let h = harness(MockTmuxBackend::new());
-        // No spawn / tui, so the brigade session was never created.
+    fn restart_without_server_errors() {
+        let h = harness(MockHerdrBackend::new());
+        // No spawn / tui, so the brigade server was never started.
         let err = run_restart(&h.config).unwrap_err();
         assert!(
             err.to_string().contains("nothing to restart"),

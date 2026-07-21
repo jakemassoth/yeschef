@@ -3,25 +3,27 @@
 //! All tests are `#[ignore]` by default. Run with:
 //!   cargo test --test e2e -- --ignored
 //!
-//! Requirements: `git` and `tmux` in PATH. No containers, no Nix, no macOS
-//! requirement — the tests drive real git worktrees and real tmux sessions.
+//! Requirements: `git` and `herdr` in PATH. The tests drive real git worktrees
+//! and a real herdr server.
 //!
-//! ## Socket isolation
+//! ## Session isolation
 //!
-//! The suite NEVER touches the operator's live `yeschef` tmux server. Each
-//! [`TestEnv`] mints its OWN unique, throwaway `-L` socket (see
-//! [`unique_socket`]), exports it as `YESCHEF_TMUX_SOCKET` so every `yeschef`
-//! binary that env spawns drives that same private server, and points every
-//! direct `tmux` helper on the env at it too. So a `kill-session` (or the
-//! whole-server `kill-server` teardown) can only ever affect that one env's
-//! server — never another test's, and never the operator's live session (even
-//! when the suite is run from inside one). When a `TestEnv` drops, its `Drop`
-//! impl runs `kill-server` to dispose of the private server process on pass,
-//! fail, or panic; the socket FILE itself lives under the env's temp dir (via
-//! `TMUX_TMPDIR`), so it is removed with that dir too — nothing (server or
-//! socket) leaks into the shared `/tmp/tmux-<uid>/` tree. Because every test has
-//! a fully independent server, the suite is safe under cargo's default parallel
-//! execution — no `--test-threads=1` needed.
+//! The suite NEVER touches the operator's live `yeschef` herdr brigade. Each
+//! [`TestEnv`] uses its OWN unique, throwaway herdr session name (see
+//! [`unique_session`]), exported as `YESCHEF_HERDR_SESSION` so every `yeschef`
+//! binary that env spawns — and the detached herdr server it starts — drives
+//! that one private session. Each env also gets its OWN `XDG_CONFIG_HOME` (herdr
+//! derives its socket path, session state, and logs from there), rooted under
+//! the env's temp dir, so two tests never share a herdr server or its on-disk
+//! state. On `Drop` the env stops its server (`herdr server stop`) and the temp
+//! dir removes the config home with it. Because every test has a fully
+//! independent session + config home, the suite is safe under cargo's default
+//! parallel execution — no `--test-threads=1` needed.
+//!
+//! The temp dir is rooted at `/tmp` (short) on purpose: herdr puts its API
+//! socket at `$XDG_CONFIG_HOME/herdr/sessions/<session>/herdr.sock`, and a unix
+//! socket path has a hard ~104-byte limit (`sun_path`). macOS's default temp dir
+//! (`/var/folders/…`) is deep enough to overflow it; `/tmp` keeps the path short.
 
 use std::path::Path;
 use std::process::Command;
@@ -35,33 +37,34 @@ use tempfile::TempDir;
 // ---------------------------------------------------------------------------
 
 /// A sandboxed `YESCHEF_HOME` backed by a temp directory, wired to its OWN
-/// private throwaway tmux server. The socket is unique per env (see
-/// [`unique_socket`]), so two tests — even running in parallel — never share a
-/// tmux server, and `Drop` tears the server down automatically.
+/// private throwaway herdr session + `XDG_CONFIG_HOME`. Two tests — even running
+/// in parallel — never share a herdr server, and `Drop` tears the server down
+/// automatically.
 struct TestEnv {
-    tmp: TempDir,
+    /// Held only to keep the temp dir alive for the env's lifetime; its `Drop`
+    /// removes the config home (and everything else) after the env's own `Drop`.
+    _tmp: TempDir,
     home: std::path::PathBuf,
-    /// This env's private tmux `-L` socket name. Handed to every spawned
-    /// `yeschef` binary via `YESCHEF_TMUX_SOCKET` and to every direct `tmux`
-    /// helper on the env, and torn down in `Drop`.
-    socket: String,
+    /// This env's private herdr `XDG_CONFIG_HOME` (herdr's socket + session
+    /// state + logs live here). Under `tmp`, so it's removed on drop.
+    config_home: std::path::PathBuf,
+    /// This env's private herdr session name, handed to every spawned `yeschef`
+    /// binary via `YESCHEF_HERDR_SESSION` and to the direct `herdr` helpers.
+    session: String,
 }
 
 impl TestEnv {
     fn new() -> Self {
-        // Root the temp dir at `/tmp` rather than the platform default. We point
-        // `TMUX_TMPDIR` here (see `cmd`) so the tmux socket lives under it and is
-        // cleaned up on drop — but a unix socket path has a hard ~104-byte limit
-        // (`sun_path`), and macOS's default temp dir (`/var/folders/…`) is deep
-        // enough that the socket path overflows it ("File name too long"). `/tmp`
-        // is short, present on both macOS and Linux, and is where tmux puts its
-        // sockets by default anyway, so the relocated socket path stays valid.
+        // See the module docs for why the temp dir is rooted at `/tmp` (herdr
+        // socket path length under `sun_path`'s ~104-byte limit).
         let tmp = TempDir::new_in("/tmp").expect("create temp dir under /tmp");
         let home = tmp.path().join("yeschef-home");
+        let config_home = tmp.path().join("cfg");
         TestEnv {
-            tmp,
+            _tmp: tmp,
             home,
-            socket: unique_socket(),
+            config_home,
+            session: unique_session(),
         }
     }
 
@@ -72,18 +75,15 @@ impl TestEnv {
     fn cmd(&self) -> assert_cmd::Command {
         let mut cmd = assert_cmd::Command::cargo_bin("yeschef").unwrap();
         cmd.env("YESCHEF_HOME", &self.home);
-        // Pin the spawned binary to THIS env's private tmux server: a unique
-        // `-L` socket name, relocated under this env's temp dir via
-        // `TMUX_TMPDIR`. The socket never drives the operator's live `yeschef`
-        // server or another test's server, and the relocation means its socket
-        // FILE is cleaned up with the temp dir on drop (see `Drop`) rather than
-        // littering the shared `/tmp/tmux-<uid>/` tree.
-        cmd.env("YESCHEF_TMUX_SOCKET", &self.socket);
-        cmd.env("TMUX_TMPDIR", self.tmp.path());
-        // The brigade session pins a head chef at window 0. Point it at a
-        // long-lived stand-in (not the real `claude`, absent in CI) rooted in a
-        // directory that exists, so ensuring the session never fast-fails and
-        // destroys it out from under the cook window we're about to add.
+        // Pin the spawned binary (and the detached herdr server it starts) to
+        // THIS env's private herdr session + config home: a unique session name
+        // and an `XDG_CONFIG_HOME` under this env's temp dir. Nothing ever drives
+        // the operator's live `yeschef` brigade or another test's server, and the
+        // config home is cleaned up with the temp dir on drop.
+        cmd.env("YESCHEF_HERDR_SESSION", &self.session);
+        cmd.env("XDG_CONFIG_HOME", &self.config_home);
+        // The brigade pins a head chef. Point it at a long-lived stand-in (not
+        // the real `claude`, absent in CI) rooted in a directory that exists.
         cmd.env("YESCHEF_SRC", &self.home);
         cmd.env("YESCHEF_HEADCHEF_CMD", "sh -c 'exec sleep 300'");
         cmd
@@ -93,70 +93,44 @@ impl TestEnv {
         self.cmd().arg("init").assert().success();
     }
 
-    /// A `tmux` command wired to this env's private server (same `-L` socket +
-    /// `TMUX_TMPDIR` as [`TestEnv::cmd`], so they resolve to the same server).
-    /// Read helpers don't need `-f` — the server is already running with its
-    /// config from the binary's spawn.
-    fn tmux(&self, args: &[&str]) -> std::process::Output {
-        Command::new("tmux")
-            .env("TMUX_TMPDIR", self.tmp.path())
-            .args(["-L", &self.socket])
+    /// A `herdr` command wired to this env's private session + config home.
+    fn herdr(&self, args: &[&str]) -> std::process::Output {
+        Command::new("herdr")
+            .env("XDG_CONFIG_HOME", &self.config_home)
+            .args(["--session", &self.session])
             .args(args)
             .output()
-            .expect("failed to run tmux")
+            .expect("failed to run herdr")
     }
 
-    /// Capture a window's scrollback via this env's tmux server.
-    fn capture(&self, window: &str) -> String {
-        let out = self.tmux(&["capture-pane", "-p", "-S", "-", "-t", &wtarget(window)]);
+    /// Raw `herdr workspace list` stdout (empty string if the server is down).
+    fn workspace_list(&self) -> String {
+        let out = self.herdr(&["workspace", "list"]);
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
-    /// Whether a ticket window exists in the brigade session.
-    fn window_exists(&self, window: &str) -> bool {
-        let out = self.tmux(&["list-windows", "-t", "yeschef", "-F", "#{window_name}"]);
-        out.status.success()
-            && String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .any(|l| l.trim() == window)
+    /// Whether a workspace with the given label exists in the brigade session.
+    fn has_workspace(&self, label: &str) -> bool {
+        self.workspace_list()
+            .contains(&format!("\"label\":\"{label}\""))
     }
 
-    /// The brigade's windows as `(index, name)` pairs, ordered by tmux's own
-    /// window ordering. Used to assert indices stay gap-free after a close.
-    fn window_indices(&self) -> Vec<(u32, String)> {
-        let out = self.tmux(&[
-            "list-windows",
-            "-t",
-            "yeschef",
-            "-F",
-            "#{window_index}\t#{window_name}",
-        ]);
-        assert!(out.status.success(), "list-windows failed");
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|l| {
-                let (idx, name) = l.split_once('\t')?;
-                Some((idx.trim().parse().ok()?, name.trim().to_string()))
-            })
-            .collect()
+    /// Whether this env's herdr server is currently running.
+    fn server_running(&self) -> bool {
+        let out = self.herdr(&["status", "server"]);
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("status: running")
     }
 }
 
 impl Drop for TestEnv {
     fn drop(&mut self) {
-        // RAII teardown, two layers:
-        //   1. `kill-server` disposes this env's tmux server PROCESS (and every
-        //      session it held) promptly — on pass, fail, or panic — so no live
-        //      throwaway server ever leaks. `TMUX_TMPDIR` MUST match `cmd`/`tmux`
-        //      so `-L` resolves to the same socket the server actually runs on.
-        //   2. The socket FILE (which tmux leaves behind after `kill-server`)
-        //      lives under `self.tmp`, so it is removed with the temp dir when
-        //      the `tmp` field drops immediately after this — keeping the shared
-        //      `/tmp/tmux-<uid>/` tree clean with no socket-path math.
-        // Best-effort — the server may already be gone if none was started.
-        let _ = Command::new("tmux")
-            .env("TMUX_TMPDIR", self.tmp.path())
-            .args(["-L", &self.socket, "kill-server"])
+        // Stop this env's herdr server promptly — on pass, fail, or panic — so no
+        // detached throwaway server leaks. Best-effort (the server may never have
+        // started). The on-disk state (socket, session json, logs) lives under
+        // `self.tmp`'s config home, removed when `tmp` drops right after.
+        let _ = Command::new("herdr")
+            .env("XDG_CONFIG_HOME", &self.config_home)
+            .args(["--session", &self.session, "server", "stop"])
             .output();
     }
 }
@@ -211,14 +185,14 @@ fn unique_name() -> String {
     format!("t{pid:08x}{:04x}", nanos & 0xffff)
 }
 
-/// A globally-unique tmux `-L` socket name for one [`TestEnv`]. Combines the
-/// PID, a nanosecond timestamp, and a process-wide atomic counter so no two
-/// envs ever collide: not two created back-to-back in the same thread (the
-/// counter breaks any timestamp tie), not two separate test-binary runs
-/// (distinct PIDs), and not a run beside a live yeschef instance (the
-/// `yeschef-test-` prefix differs from the production `yeschef` socket). Each
-/// env stands up and tears down the server on this socket by itself.
-fn unique_socket() -> String {
+/// A globally-unique herdr session name for one [`TestEnv`]. Combines the PID, a
+/// nanosecond timestamp, and a process-wide atomic counter so no two envs ever
+/// collide: not two created back-to-back in the same thread (the counter breaks
+/// any timestamp tie), not two separate test-binary runs (distinct PIDs), and
+/// not a run beside a live yeschef instance (the `yt-` prefix differs from the
+/// production `yeschef` session). Kept short so that, combined with the config
+/// home under `/tmp`, herdr's `sun_path` socket stays under its ~104-byte limit.
+fn unique_session() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
@@ -227,13 +201,7 @@ fn unique_socket() -> String {
         .as_nanos();
     let pid = std::process::id();
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("yeschef-test-{pid:08x}-{nanos:x}-{seq:x}")
-}
-
-/// The tmux target for a ticket window: a real window inside the single
-/// `yeschef` brigade session, addressed as `yeschef:<window>`.
-fn wtarget(window: &str) -> String {
-    format!("yeschef:{window}")
+    format!("yt-{pid:x}-{:x}-{seq:x}", nanos & 0xffff_ffff)
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +209,7 @@ fn wtarget(window: &str) -> String {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires git + tmux; use `cargo test --test e2e -- --ignored`"]
+#[ignore = "requires git + herdr; use `cargo test --test e2e -- --ignored`"]
 fn init_creates_expected_layout() {
     let env = TestEnv::new();
 
@@ -257,7 +225,7 @@ fn init_creates_expected_layout() {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + herdr"]
 fn init_is_idempotent() {
     let env = TestEnv::new();
     env.cmd().arg("init").assert().success();
@@ -273,7 +241,7 @@ fn init_is_idempotent() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + herdr"]
 fn project_list_empty() {
     let env = TestEnv::new();
     env.init();
@@ -285,7 +253,7 @@ fn project_list_empty() {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + herdr"]
 fn project_add_registers_bare_clone() {
     let env = TestEnv::new();
     env.init();
@@ -328,7 +296,7 @@ fn git_out(dir: &Path, args: &[&str]) -> String {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + herdr"]
 fn project_add_makes_origin_main_resolve() {
     // The core fix: after `project add`, `origin/main` must resolve in the bare
     // clone so `spawn --base origin/main` and `git rebase origin/main` work.
@@ -358,7 +326,7 @@ fn project_add_makes_origin_main_resolve() {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + herdr"]
 fn refresh_repairs_clone_with_no_tracking_refspec() {
     // Migration path: a bare clone created the old way (no fetch refspec) has no
     // origin/* refs. `refresh` must repair the refspec and populate them.
@@ -367,10 +335,6 @@ fn refresh_repairs_clone_with_no_tracking_refspec() {
     let repo = SampleRepo::new();
     let name = unique_name();
 
-    // Simulate a pre-fix registration: clone bare ourselves so no refspec/fetch
-    // happens, then register the name in yeschef via a normal add against a
-    // throwaway path is not possible — instead, add then strip the refspec to
-    // mimic the broken on-disk state of an old clone.
     env.cmd()
         .args(["project", "add", &repo.url(), &name])
         .assert()
@@ -402,7 +366,7 @@ fn refresh_repairs_clone_with_no_tracking_refspec() {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + herdr"]
 fn project_add_duplicate_name_rejected() {
     let env = TestEnv::new();
     env.init();
@@ -421,7 +385,7 @@ fn project_add_duplicate_name_rejected() {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + herdr"]
 fn project_add_invalid_name_rejected() {
     let env = TestEnv::new();
     env.init();
@@ -435,11 +399,11 @@ fn project_add_invalid_name_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// orchestration error tests (no tmux session required)
+// orchestration error tests (no herdr server required)
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + herdr"]
 fn spawn_unknown_project_gives_clear_error() {
     let env = TestEnv::new();
     env.init();
@@ -451,7 +415,7 @@ fn spawn_unknown_project_gives_clear_error() {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + herdr"]
 fn send_unknown_ticket_gives_clear_error() {
     let env = TestEnv::new();
     env.init();
@@ -473,8 +437,8 @@ fn send_unknown_ticket_gives_clear_error() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires git + tmux"]
-fn spawn_creates_worktree_and_live_window() {
+#[ignore = "requires git + herdr"]
+fn spawn_creates_worktree_and_live_workspace() {
     let env = TestEnv::new();
     env.init();
     let repo = SampleRepo::new();
@@ -484,14 +448,12 @@ fn spawn_creates_worktree_and_live_window() {
         .assert()
         .success();
 
-    let window = format!("{name}-demo");
+    let label = format!("{name}/demo");
 
-    // The prompt is no longer passed inline; spawn writes it to a file and
-    // hands the agent a short "read this file" instruction (guards against the
-    // ENAMETOOLONG bug on long prompts). The stand-in agent is a shell program
-    // that echoes a liveness marker, prints the instruction it received (which
-    // arrives as `$0`), and stays alive — mirroring how a real agent takes the
-    // instruction as its first positional arg.
+    // The prompt is written to a file; the agent is launched with a short "read
+    // this file" instruction (guards against the ENAMETOOLONG bug on long
+    // prompts). The stand-in agent echoes a liveness marker, prints the
+    // instruction it received (which arrives as `$0`), and stays alive.
     let prompt_body = "PROMPT_BODY_MARKER: refactor the widget subsystem.";
     env.cmd()
         .args([
@@ -546,43 +508,34 @@ fn spawn_creates_worktree_and_live_window() {
         "prompt file should end with the verbatim user prompt after the rule; got:\n{written}"
     );
 
-    // tmux session is live.
+    // The herdr workspace is live.
     assert!(
-        env.window_exists(&window),
-        "tmux session for '{window}' should exist"
+        env.has_workspace(&label),
+        "herdr workspace '{label}' should exist; got:\n{}",
+        env.workspace_list()
     );
 
     // Give the shell a moment to echo, then peek should show the marker and the
     // file-indirection instruction the agent was launched with.
-    std::thread::sleep(std::time::Duration::from_millis(800));
-    let pane = env.capture(&window);
-    assert!(
-        pane.contains("SPAWN_OK"),
-        "pane should show the agent's output; got:\n{pane}"
-    );
-    assert!(
-        pane.contains("Read the ticket brief at"),
-        "pane should show the read-this-file instruction; got:\n{pane}"
-    );
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    env.cmd()
+        .args(["peek", &name, "demo"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("SPAWN_OK"))
+        .stdout(predicate::str::contains("Read the ticket brief at"));
 
-    // status lists the ticket as running.
+    // status lists the ticket (not gone).
     env.cmd()
         .args(["status"])
         .assert()
         .success()
         .stdout(predicate::str::contains(format!("{name}/demo")))
-        .stdout(predicate::str::contains("running"));
-
-    // peek via the CLI returns content too.
-    env.cmd()
-        .args(["peek", &name, "demo"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("SPAWN_OK"));
+        .stdout(predicate::str::contains("gone").not());
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + herdr"]
 fn send_reaches_the_pane() {
     let env = TestEnv::new();
     env.init();
@@ -593,35 +546,32 @@ fn send_reaches_the_pane() {
         .assert()
         .success();
 
-    let window = format!("{name}-demo");
-
-    // `cat` reading stdin echoes whatever we send into the pane and stays
-    // alive (tmux destroys a session whose process exits). Wrapping it in
-    // `sh -c 'cat'` keeps cat argument-free — the read-this-file instruction
-    // lands in `$0` — so it reads stdin instead of treating the instruction as
-    // a filename and exiting.
+    // `cat` reading stdin echoes whatever we send into the pane and stays alive.
+    // Wrapping it in `sh -c 'cat'` keeps cat argument-free — the read-this-file
+    // instruction lands in `$0` — so it reads stdin instead of treating the
+    // instruction as a filename and exiting.
     env.cmd()
         .args(["spawn", &name, "demo", "--agent", "sh -c 'cat'"])
         .assert()
         .success();
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(std::time::Duration::from_secs(1));
 
     env.cmd()
         .args(["send", &name, "demo", "HELLO_FROM_SEND"])
         .assert()
         .success();
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(std::time::Duration::from_millis(800));
 
-    let pane = env.capture(&window);
-    assert!(
-        pane.contains("HELLO_FROM_SEND"),
-        "sent text should appear in the pane; got:\n{pane}"
-    );
+    env.cmd()
+        .args(["peek", &name, "demo"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("HELLO_FROM_SEND"));
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
-fn kill_removes_window_and_deregisters() {
+#[ignore = "requires git + herdr"]
+fn kill_removes_workspace_and_deregisters() {
     let env = TestEnv::new();
     env.init();
     let repo = SampleRepo::new();
@@ -631,17 +581,15 @@ fn kill_removes_window_and_deregisters() {
         .assert()
         .success();
 
-    let window = format!("{name}-demo");
+    let label = format!("{name}/demo");
 
     env.cmd()
-        // A genuinely long-lived agent so the session stays up for the check;
-        // the read-this-file instruction lands in `$0` and is ignored.
         .args(["spawn", &name, "demo", "--agent", "sh -c 'sleep 30'"])
         .assert()
         .success();
     assert!(
-        env.window_exists(&window),
-        "window should exist after spawn"
+        env.has_workspace(&label),
+        "workspace should exist after spawn"
     );
 
     env.cmd()
@@ -650,8 +598,9 @@ fn kill_removes_window_and_deregisters() {
         .success();
 
     assert!(
-        !env.window_exists(&window),
-        "window should be gone after kill"
+        !env.has_workspace(&label),
+        "workspace should be gone after kill; got:\n{}",
+        env.workspace_list()
     );
 
     let worktree = env
@@ -674,84 +623,11 @@ fn kill_removes_window_and_deregisters() {
 }
 
 // ---------------------------------------------------------------------------
-// window reindexing
-// ---------------------------------------------------------------------------
-
-/// Killing a middle cook must not leave a hole in the window numbering: the
-/// survivors renumber so the head chef stays at 0 and cooks stay contiguous
-/// (`renumber-windows on` in tmux.conf). Otherwise `prefix+<n>` stops landing on
-/// the nth cook.
-#[test]
-#[ignore = "requires git + tmux"]
-fn killing_a_middle_cook_reindexes_windows_gap_free() {
-    let env = TestEnv::new();
-    env.init();
-    let repo = SampleRepo::new();
-    let name = unique_name();
-    env.cmd()
-        .args(["project", "add", &repo.url(), &name])
-        .assert()
-        .success();
-
-    // Three long-lived cooks: head chef at 0, cooks at 1, 2, 3.
-    for branch in ["alpha", "bravo", "charlie"] {
-        env.cmd()
-            .args(["spawn", &name, branch, "--agent", "sh -c 'sleep 30'"])
-            .assert()
-            .success();
-    }
-
-    let before = env.window_indices();
-    let idx = |b: &str| {
-        before
-            .iter()
-            .find(|(_, n)| *n == format!("{name}-{b}"))
-            .unwrap_or_else(|| panic!("{b} window missing; got {before:?}"))
-            .0
-    };
-    assert_eq!(idx("alpha"), 1, "before: {before:?}");
-    assert_eq!(idx("bravo"), 2, "before: {before:?}");
-    assert_eq!(idx("charlie"), 3, "before: {before:?}");
-
-    // Kill the MIDDLE cook. Without renumbering this would leave 0, 1, 3.
-    env.cmd().args(["kill", &name, "bravo"]).assert().success();
-
-    // tmux applies renumber-windows on close; give the server a beat to settle.
-    std::thread::sleep(std::time::Duration::from_millis(300));
-
-    // Survivors are contiguous from 0, with charlie pulled down into the hole.
-    let after = env.window_indices();
-    let names: Vec<&str> = after.iter().map(|(_, n)| n.as_str()).collect();
-    assert!(
-        !names.contains(&format!("{name}-bravo").as_str()),
-        "killed cook still present: {after:?}"
-    );
-    let indices: Vec<u32> = after.iter().map(|(i, _)| *i).collect();
-    assert_eq!(
-        indices,
-        vec![0, 1, 2],
-        "windows must renumber gap-free after a middle kill; got {after:?}"
-    );
-    let at = |i: u32| {
-        after
-            .iter()
-            .find(|(idx, _)| *idx == i)
-            .map(|(_, n)| n.as_str())
-    };
-    assert_eq!(at(1), Some(format!("{name}-alpha").as_str()), "{after:?}");
-    assert_eq!(
-        at(2),
-        Some(format!("{name}-charlie").as_str()),
-        "charlie should slide into the freed slot; {after:?}"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // cleanup
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + herdr"]
 fn cleanup_dry_run_reports_without_removing() {
     let env = TestEnv::new();
     env.init();
@@ -762,7 +638,7 @@ fn cleanup_dry_run_reports_without_removing() {
         .assert()
         .success();
 
-    let window = format!("{name}-demo");
+    let label = format!("{name}/demo");
 
     // A branch spawned from `main` points at main's tip, so it is an ancestor
     // of origin/main — classified "merged". That alone is no longer enough to
@@ -773,8 +649,8 @@ fn cleanup_dry_run_reports_without_removing() {
         .assert()
         .success();
     assert!(
-        env.window_exists(&window),
-        "window should exist after spawn"
+        env.has_workspace(&label),
+        "workspace should exist after spawn"
     );
     env.cmd()
         .args(["ticket", &name, "demo", "status-set", "DONE"])
@@ -790,10 +666,10 @@ fn cleanup_dry_run_reports_without_removing() {
         .stdout(predicate::str::contains("would reap"))
         .stdout(predicate::str::contains(format!("{name}/demo")));
 
-    // The window, worktree, and registry entry all survive the dry run.
+    // The workspace, worktree, and registry entry all survive the dry run.
     assert!(
-        env.window_exists(&window),
-        "dry run must not kill the window"
+        env.has_workspace(&label),
+        "dry run must not close the workspace"
     );
     let worktree = env
         .home_path()
@@ -810,7 +686,7 @@ fn cleanup_dry_run_reports_without_removing() {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + herdr"]
 fn cleanup_yes_reaps_merged_ticket() {
     let env = TestEnv::new();
     env.init();
@@ -821,15 +697,15 @@ fn cleanup_yes_reaps_merged_ticket() {
         .assert()
         .success();
 
-    let window = format!("{name}-demo");
+    let label = format!("{name}/demo");
 
     env.cmd()
         .args(["spawn", &name, "demo", "--agent", "sh -c 'sleep 30'"])
         .assert()
         .success();
     assert!(
-        env.window_exists(&window),
-        "window should exist after spawn"
+        env.has_workspace(&label),
+        "workspace should exist after spawn"
     );
 
     // The branch is "merged" (points at main's tip), but reaping also requires
@@ -846,10 +722,11 @@ fn cleanup_yes_reaps_merged_ticket() {
         .stdout(predicate::str::contains("reaped"))
         .stdout(predicate::str::contains(format!("{name}/demo")));
 
-    // Session, worktree, and registry entry are all gone.
+    // Workspace, worktree, and registry entry are all gone.
     assert!(
-        !env.window_exists(&window),
-        "window should be killed by cleanup"
+        !env.has_workspace(&label),
+        "workspace should be closed by cleanup; got:\n{}",
+        env.workspace_list()
     );
     let worktree = env
         .home_path()
@@ -866,7 +743,7 @@ fn cleanup_yes_reaps_merged_ticket() {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
+#[ignore = "requires git + herdr"]
 fn cleanup_yes_keeps_active_ticket_even_when_merged() {
     // Regression guard: a freshly-spawned ticket has no commits, so its branch
     // classifies "merged" — but the cook is still working it (status stays at
@@ -880,21 +757,20 @@ fn cleanup_yes_keeps_active_ticket_even_when_merged() {
         .assert()
         .success();
 
-    let window = format!("{name}-demo");
+    let label = format!("{name}/demo");
 
     env.cmd()
         .args(["spawn", &name, "demo", "--agent", "sh -c 'sleep 30'"])
         .assert()
         .success();
     assert!(
-        env.window_exists(&window),
-        "window should exist after spawn"
+        env.has_workspace(&label),
+        "workspace should exist after spawn"
     );
 
-    // Even with --yes, the merged-but-active ticket is kept, and the report
-    // says why. (The summary line always contains the word "reaped" — e.g.
-    // "0 reaped, 1 kept" — so we assert on the absence of the per-ticket reap
-    // line for this branch specifically.)
+    // Even with --yes, the merged-but-active ticket is kept, and the report says
+    // why. (The summary line always contains the word "reaped" — e.g. "0 reaped,
+    // 1 kept" — so we assert on the absence of the per-ticket reap line.)
     env.cmd()
         .args(["cleanup", &name, "--yes"])
         .assert()
@@ -903,10 +779,10 @@ fn cleanup_yes_keeps_active_ticket_even_when_merged() {
         .stdout(predicate::str::contains("active"))
         .stdout(predicate::str::contains(format!("reaped {name}/demo")).not());
 
-    // Window, worktree, and registry entry all survive.
+    // Workspace, worktree, and registry entry all survive.
     assert!(
-        env.window_exists(&window),
-        "active ticket's window must survive"
+        env.has_workspace(&label),
+        "active ticket's workspace must survive"
     );
     let worktree = env
         .home_path()
@@ -927,13 +803,12 @@ fn cleanup_yes_keeps_active_ticket_even_when_merged() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires git + tmux"]
-fn restart_respawns_agent_in_place() {
-    // `restart` swaps the process inside each live window for a fresh one while
-    // keeping the window itself (its tab/position/worktree). We prove the swap
-    // with a stand-in agent that appends a tick to a file in its worktree each
-    // time it starts, then sleeps: one tick after spawn, a second after
-    // restart, with the window surviving throughout.
+#[ignore = "requires git + herdr"]
+fn restart_restores_the_brigade() {
+    // `restart` stops and restarts the herdr server. herdr persists the session
+    // to disk, so the workspaces come back after the bounce (and, for supported
+    // integrations, agents resume — our stand-in isn't one, so we only assert
+    // the workspace is restored, not the process).
     let env = TestEnv::new();
     env.init();
     let repo = SampleRepo::new();
@@ -943,69 +818,41 @@ fn restart_respawns_agent_in_place() {
         .assert()
         .success();
 
-    let window = format!("{name}-demo");
-    // `echo … >> restart_ticks.txt` lands in the pane's cwd (the worktree,
-    // re-pinned via respawn's `-c`); the read-this-file instruction arrives in
-    // `$0` and is ignored, so the agent never treats it as a filename.
+    let label = format!("{name}/demo");
     env.cmd()
-        .args([
-            "spawn",
-            &name,
-            "demo",
-            "--agent",
-            "sh -c 'echo tick >> restart_ticks.txt; sleep 30'",
-        ])
+        .args(["spawn", &name, "demo", "--agent", "sh -c 'sleep 30'"])
         .assert()
         .success();
-
-    let ticks = env
-        .home_path()
-        .join("projects")
-        .join(&name)
-        .join("worktrees")
-        .join("demo")
-        .join("restart_ticks.txt");
-
-    let count_ticks = || std::fs::read_to_string(&ticks).map_or(0, |s| s.lines().count());
-
-    std::thread::sleep(std::time::Duration::from_millis(800));
     assert!(
-        env.window_exists(&window),
-        "window should exist after spawn"
+        env.has_workspace(&label),
+        "workspace should exist after spawn"
     );
-    assert_eq!(count_ticks(), 1, "agent should have ticked once on spawn");
 
-    // Restart: the head chef and every live cook are respawned in place.
     env.cmd()
         .args(["restart"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("restarted"))
-        .stdout(predicate::str::contains(format!("{name}/demo")));
+        .stdout(predicate::str::contains("restarted"));
 
     std::thread::sleep(std::time::Duration::from_millis(800));
 
-    // The window is still there (respawn preserves it — not kill + recreate),
-    // and the agent process was genuinely relaunched (a second tick).
+    // The server is back up and the cook's workspace was restored from herdr's
+    // persisted session state.
     assert!(
-        env.window_exists(&window),
-        "window must survive restart (respawned in place, not killed)"
+        env.server_running(),
+        "the brigade server must be running again after restart"
     );
     assert!(
-        env.window_exists("headchef"),
-        "the head chef window must survive restart too"
-    );
-    assert_eq!(
-        count_ticks(),
-        2,
-        "restart should relaunch the agent in the same worktree (a second tick)"
+        env.has_workspace(&label),
+        "the cook's workspace must be restored after restart; got:\n{}",
+        env.workspace_list()
     );
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
-fn restart_without_session_errors() {
-    // With no brigade session up, there's nothing running to restart — say so
+#[ignore = "requires git + herdr"]
+fn restart_without_server_errors() {
+    // With no brigade server up, there's nothing running to restart — say so
     // rather than silently doing nothing.
     let env = TestEnv::new();
     env.init();
@@ -1017,8 +864,8 @@ fn restart_without_session_errors() {
 }
 
 #[test]
-#[ignore = "requires git + tmux"]
-fn spawn_duplicate_window_rejected() {
+#[ignore = "requires git + herdr"]
+fn spawn_duplicate_workspace_rejected() {
     let env = TestEnv::new();
     env.init();
     let repo = SampleRepo::new();
@@ -1029,14 +876,10 @@ fn spawn_duplicate_window_rejected() {
         .success();
 
     env.cmd()
-        // A genuinely long-lived agent so the session stays up for the check;
-        // the read-this-file instruction lands in `$0` and is ignored.
         .args(["spawn", &name, "demo", "--agent", "sh -c 'sleep 30'"])
         .assert()
         .success();
     env.cmd()
-        // A genuinely long-lived agent so the session stays up for the check;
-        // the read-this-file instruction lands in `$0` and is ignored.
         .args(["spawn", &name, "demo", "--agent", "sh -c 'sleep 30'"])
         .assert()
         .failure()

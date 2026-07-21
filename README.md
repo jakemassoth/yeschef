@@ -1,14 +1,16 @@
 # yeschef
 
-Orchestrate multiple coding agents in parallel across git worktrees, using tmux.
+Orchestrate multiple coding agents in parallel across git worktrees, using
+[herdr](https://github.com/ogulcancelik/herdr) (an "agent multiplexer") as the terminal
+layer.
 
 yeschef lets **one** agent session (the head chef) dispatch and supervise a brigade of
-agents, each working on its own branch in its own git worktree inside its own window of a
-shared `yeschef` tmux session. You talk to the head chef; it spawns line cooks, steers
+agents, each working on its own branch in its own git worktree inside its own workspace of a
+shared `yeschef` herdr session. You talk to the head chef; it spawns line cooks, steers
 them, reads their output, and reports back. It is **agent-agnostic** — a line cook is just a
-command launched in a tmux window (`claude`, `codex`, `aider`, …), so nothing is tied to a
-particular vendor. `yeschef attach` gives the human a live, colour-coded tab bar of the
-whole brigade — tmux's own status line, one tab per cook.
+command launched in a herdr pane (`claude`, `codex`, `aider`, …), so nothing is tied to a
+particular vendor. `yeschef attach` hands the human herdr's native UI, where the whole
+brigade shows as live, status-coloured workspaces (herdr detects each agent's state).
 
 > Inspired by [firstmate](https://github.com/kunchenguid/firstmate). Where firstmate is
 > bash scripts + an `AGENTS.md`, yeschef is a single Rust CLI that *is* the toolbelt, plus
@@ -17,9 +19,9 @@ whole brigade — tmux's own status line, one tab per cook.
 ## Requirements
 
 `git` on your `PATH`, plus either Nix or Rust/Cargo to run yeschef itself from source (see
-[Running yeschef](#running-yeschef)). `nix run` ships a bundled `tmux`, so you don't need
-one pre-installed; a Cargo build falls back to a `tmux` on your `PATH`. No containers, no
-macOS requirement.
+[Running yeschef](#running-yeschef)). `nix run` bakes a bundled `herdr` onto yeschef's
+PATH, so you don't need one pre-installed; a Cargo build falls back to a `herdr` on your
+`PATH`. No containers, no macOS requirement.
 
 ## Workflow
 
@@ -28,15 +30,15 @@ yeschef init                                  # ~/yeschef + AGENTS.md
 yeschef project add <git-url> [name]          # bare clone + worktrees dir
 yeschef refresh [<project>]                   # git fetch --prune (all projects if omitted)
 
-# dispatch a line cook: worktree + tmux window + agent
+# dispatch a line cook: worktree + herdr workspace + agent
 yeschef spawn <project> <branch> -p "Implement X and summarize what changed"
 
-yeschef status                                # who's running / dead / gone
+yeschef status                                # who's running / gone + herdr's live state
 yeschef peek  <project> <branch>              # read an agent's pane
 yeschef send  <project> <branch> "use the helper in utils.rs"   # one-line steer
-yeschef tui                                   # attach to the brigade tab bar (native tmux UI)
+yeschef tui                                   # attach to herdr's native brigade UI
 yeschef attach [<project> <branch>]           # watch the brigade live
-yeschef restart                               # restart every running agent in place, resuming its conversation
+yeschef restart                               # bounce the herdr server; workspaces restored, agents resumed
 yeschef kill  <project> <branch> --rm-worktree
 yeschef cleanup [<project>] [--yes]           # reap merged/gone + DONE tickets (dry run unless --yes)
 ```
@@ -66,9 +68,9 @@ nix build              # or: cargo build
 nix build .#clippy     # clippy -D warnings -D clippy::pedantic
 nix build .#test       # or: cargo test  (unit tests, no external deps)
 
-# e2e (real git + tmux; no containers/macOS needed)
+# e2e (real git + herdr; no containers/macOS needed)
 cargo test --test e2e -- --ignored
-nix run .#e2e          # PATH-checks git + tmux first
+nix run .#e2e          # puts git + herdr on PATH first
 ```
 
 ## Status
