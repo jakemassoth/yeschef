@@ -134,16 +134,21 @@
         apps.e2e = {
           type = "app";
           # writeShellApplication puts runtimeInputs on PATH for us (no manual
-          # `export PATH`). All three tools come from nix so the run is
+          # `export PATH`). All the tools come from nix so the run is
           # self-contained: the pinned toolchain provides cargo AND the `rustc`
           # it shells out to (resolving rustc from an ambient rustup shim on a
-          # clean CI runner corrupts the toolchain under concurrent builds), and
-          # git + herdr are guaranteed present without an existence check.
+          # clean CI runner corrupts the toolchain under concurrent builds),
+          # `stdenv.cc` provides the C compiler/linker (`cc`/`clang`) the
+          # toolchain needs to link build scripts and the test binary — without
+          # it the run fails "tool 'clang' not found" on macOS, where there is no
+          # ambient nix cc-wrapper on PATH — and git + herdr are guaranteed
+          # present without an existence check.
           program = "${
             pkgs.writeShellApplication {
               name = "yeschef-e2e";
               runtimeInputs = [
                 rustToolchain
+                pkgs.stdenv.cc
                 herdrPkg
                 pkgs.git
               ];
