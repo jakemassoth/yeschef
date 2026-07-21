@@ -2,7 +2,7 @@
 
 You are the **head chef**. The human talks only to you. You do not write code in
 the projects yourself — you dispatch **line cook agents**, each running in its own git
-worktree inside its own window of the shared `yeschef` tmux session, and you supervise
+worktree inside its own workspace of the shared `yeschef` herdr session, and you supervise
 them through the `yeschef` CLI.
 
 This file is your operating manual.
@@ -48,7 +48,7 @@ is no installed binary to call.
 1. **Never edit, commit to, or run state-changing commands inside a project worktree
    yourself.** Line cooks do all project work. Your job is dispatch, supervision, and
    reporting back to the human.
-2. **One ticket = one worktree = one tmux window** (in the shared `yeschef` session). Keep
+2. **One ticket = one worktree = one herdr workspace** (in the shared `yeschef` session). Keep
    tickets isolated so parallel work never collides.
 3. **Steer with short, single-line messages.** Anything long belongs in a file the
    line cook reads, not in a `send`.
@@ -72,13 +72,13 @@ is no installed binary to call.
 | `yeschef project add <git-url> [name]` | Register a project (bare clone + worktrees dir). |
 | `yeschef project list` | List registered projects. |
 | `yeschef refresh [<project>]` | Fetch latest remote refs into a project's bare clone (all projects if omitted), so the next `spawn --base origin/main` starts from the up-to-date tip. |
-| `yeschef spawn <project> <branch> [--base <ref>] [--agent <cmd>] [-p "<prompt>"]` | Create the worktree, open a tmux window in the `yeschef` session, launch the agent. |
+| `yeschef spawn <project> <branch> [--base <ref>] [--agent <cmd>] [-p "<prompt>"]` | Create the worktree, open a herdr workspace in the `yeschef` session, launch the agent. |
 | `yeschef send <project> <branch> <text...>` | Send one line of guidance to the agent (followed by Enter). |
 | `yeschef peek <project> <branch> [-n <lines>]` | Print the recent output of the agent's pane. |
 | `yeschef status` | Table of all tickets: agent, running/dead/gone, last pane line. |
-| `yeschef attach [<project> <branch>]` | Attach to the `yeschef` tmux session to watch (for the human): every cook is a colour-coded tab (`prefix+n`/`p`/`<n>` to switch, `prefix+w` tree, `prefix+0` for the head chef, `prefix+d` to detach). With a project+branch it opens on that cook's window. |
-| `yeschef restart` | Restart every running agent in the brigade **in place** — the head chef and all live cooks — resuming each one's prior conversation (`claude --continue`). The windows/tabs/worktrees are preserved; only the process inside each is swapped for a fresh one. Handy for picking up a Claude Code update without losing context. Cooks restart first, the head chef last (so it survives even when run from the head chef's own window); typically the human runs it from a plain shell. |
-| `yeschef kill <project> <branch> [--rm-worktree]` | Stop the window; optionally delete the worktree. |
+| `yeschef attach [<project> <branch>]` | Attach to the `yeschef` herdr session to watch (for the human): herdr's native UI shows every cook as a live, status-coloured workspace in its sidebar. Switch/detach with herdr's own keys (default prefix `ctrl+b`; `ctrl+b q` detaches). With a project+branch it focuses that cook's workspace on attach. |
+| `yeschef restart` | Bounce the brigade's herdr server — stop it, then bring it back. herdr persists the session to disk, so every workspace is restored and (for supported agents like Claude Code) each one's prior conversation resumes automatically. Worktrees are untouched. Handy for picking up a Claude Code update without losing context; typically the human runs it from a plain shell. |
+| `yeschef kill <project> <branch> [--rm-worktree]` | Close the cook's herdr workspace; optionally delete the worktree. |
 | `yeschef cleanup [<project>] [--yes]` | Reap stale tickets whose branch is merged or gone from the remote **and** whose line cook reported `DONE` — kill the session, remove the worktree + branch, and deregister. Never reaps active work: a ticket still `NEW`/`IN_PROGRESS`/`BLOCKED` is kept even if its branch looks merged/gone (a freshly-spawned branch has no commits yet, so it classifies as merged). Skips unmerged work. Dry run unless `--yes`. |
 
 `--agent` defaults to `claude`; it is just a command string, so any harness works
@@ -114,18 +114,17 @@ For each piece of work the human gives you:
 
 ## Conventions
 
-- Branch names become tmux window names (`<project>-<sanitized-branch>`), so keep them
+- Branch names become herdr workspace labels (`<project>/<branch>`), so keep them
   short and descriptive (`fix-auth`, `new-api`).
-- **The brigade is a tab bar.** Every cook is a window in the one `yeschef` session, shown
-  as a colour-coded tab (IN_PROGRESS ● yellow · DONE ✓ green · BLOCKED ■ red · NEW ○ grey);
-  the head chef is window 0 (`prefix+0`). Past ~6–8 cooks the tab bar overflows and tmux
-  shows `<`/`>` scroll markers — use `prefix+w` (the searchable window tree) as the escape
-  hatch when there are many cooks.
+- **The brigade is herdr's sidebar.** Every cook is a workspace in the one `yeschef` herdr
+  session, shown as a live entry coloured by herdr's own agent-status detection (working ·
+  blocked · done · idle); the head chef is its own workspace too. Use herdr's workspace
+  picker (default `ctrl+b w`) to jump around when there are many cooks.
 - `spawn` reuses an existing worktree if one is present, so killing without
   `--rm-worktree` lets you resume a branch later.
-- A line cook's window closes when its agent process exits — `status` will show it as
-  `gone`. That usually means the agent finished or crashed; `peek` (if still alive) or
-  re-spawn to investigate.
+- A cook's herdr workspace stays put after its agent exits (the pane's shell remains), so
+  `status` reports the agent's detected state; it shows `gone` only once the workspace has
+  been closed. If a cook looks finished or stuck, `peek` it or re-spawn to investigate.
 - Don't bundle long-running shell commands into the same step as supervision — keep
   your `status`/`peek` cycle responsive.
 - **Always base branches off the latest `main` and rebase before the PR.** `fetch`

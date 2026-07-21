@@ -69,11 +69,9 @@ fn sanitize_for_project(s: &str) -> String {
     result
 }
 
-/// Sanitize a branch name for use in derived window / tmux session names.
-/// Replace any char not in `[a-z0-9-]` with `-`, collapse consecutive `-`,
-/// strip leading/trailing `-`. Notably this strips `.` and `:`, which tmux
-/// treats as target separators (`session:window.pane`), so the sanitized name
-/// stays a clean tmux target.
+/// Sanitize a branch name into a filesystem-safe token, used for the per-ticket
+/// spawn prompt file name (`<project>-<sanitized>.md`). Replace any char not in
+/// `[a-z0-9-]` with `-`, collapse consecutive `-`, strip leading/trailing `-`.
 pub fn sanitize_branch(branch: &str) -> String {
     let lower = branch.to_lowercase();
     let mut result: String = lower
@@ -95,35 +93,21 @@ pub fn sanitize_branch(branch: &str) -> String {
     result
 }
 
-/// The single brigade tmux session that holds every window: the head chef at
-/// window 0 and one window per line cook.
-///
-/// The real tmux backend runs all cooks as windows inside this one session (see
-/// `backend::real`), which is what lets `tmux attach` show them together in a
-/// native tab bar — the yeschef TUI.
-pub fn yeschef_session() -> &'static str {
-    "yeschef"
-}
-
-/// The window name of the pinned head chef — window 0 of the brigade session
-/// (see [`yeschef_session`]), a Claude Code session running in the yeschef
-/// source checkout.
-///
-/// Safe to sit alongside cook windows: [`window_name`] always joins with a `-`,
-/// so a cook window is always `<project>-<branch>` and can never collide with
-/// the bare `headchef` name. Being window 0 makes "back to the head chef" a
-/// single keystroke (`prefix+0`) in the native tmux UI.
-pub fn headchef_window() -> &'static str {
+/// The label of the pinned head-chef workspace in the brigade herdr session — a
+/// Claude Code session running in the yeschef source checkout. yeschef looks up
+/// the head chef by this label (see `commands::orchestrate::ensure_brigade`);
+/// cook workspaces are labelled `<project>/<branch>` (see [`workspace_label`]),
+/// which always contains a `/`, so a cook can never collide with this label.
+pub fn headchef_label() -> &'static str {
     "headchef"
 }
 
-/// Derive the ticket window name from project + sanitized branch.
-///
-/// Avoids `.` and `:` (tmux target separators) so the name stays safe to embed
-/// in a tmux session id. `sanitize_branch` already strips `.`/`:`, so a `-`
-/// join is safe.
-pub fn window_name(project: &str, sanitized_branch: &str) -> String {
-    format!("{project}-{sanitized_branch}")
+/// The label of a line cook's herdr workspace: `<project>/<branch>`. Purely
+/// human-facing (shown in herdr's TUI) — yeschef matches a ticket to its
+/// workspace by the stored `workspace_id`, not by this label, so labels need not
+/// be unique. herdr accepts `/` in labels.
+pub fn workspace_label(project: &str, branch: &str) -> String {
+    format!("{project}/{branch}")
 }
 
 #[cfg(test)]
@@ -163,19 +147,21 @@ mod tests {
     }
 
     #[test]
-    fn window_name_derivation() {
+    fn workspace_label_derivation() {
+        // The cook workspace label is the human-facing `<project>/<branch>`,
+        // keeping the real branch name (slashes and all) for herdr's TUI.
         assert_eq!(
-            window_name("myproject", "feature-foo"),
-            "myproject-feature-foo"
+            workspace_label("myproject", "feature/foo"),
+            "myproject/feature/foo"
         );
+        assert_eq!(workspace_label("proj", "main"), "proj/main");
     }
 
     #[test]
-    fn window_name_is_target_safe() {
-        // sanitize_branch + window_name must never produce `.` or `:` (tmux
-        // target separators) so the name stays safe to embed as a tmux session
-        // id.
-        let w = window_name("proj", &sanitize_branch("feature/x.y:z"));
-        assert!(!w.contains('.') && !w.contains(':'), "got {w}");
+    fn headchef_label_never_collides_with_a_cook() {
+        // A cook label always contains a `/` (project/branch); the head-chef
+        // label never does, so they can't collide.
+        assert!(!headchef_label().contains('/'));
+        assert!(workspace_label("proj", "x").contains('/'));
     }
 }

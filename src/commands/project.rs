@@ -135,7 +135,7 @@ fn refresh_one(config: &Config, name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::mock::{MockGitBackend, MockTmuxBackend};
+    use crate::backend::mock::{MockGitBackend, MockHerdrBackend};
     use crate::store::Store;
     use tempfile::TempDir;
 
@@ -156,7 +156,7 @@ mod tests {
             home: tmp.path().to_path_buf(),
             store,
             git: Box::new(git.clone()),
-            tmux: Box::new(MockTmuxBackend::new()),
+            herdr: Box::new(MockHerdrBackend::new()),
         };
         Harness {
             config,

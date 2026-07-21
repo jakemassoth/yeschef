@@ -1,7 +1,17 @@
 # Investigation: replacing yeschef's tmux TUI/orchestration with `herdr`
 
-**Status:** investigation + first concrete step (flake integration). No existing
-behaviour changed; nothing in yeschef links or depends on herdr yet.
+> **Update (adopted):** this document is the original investigation. Since it was
+> written, the human approved the migration and it has been **implemented**:
+> yeschef's tmux backend is gone and herdr is now the session/TUI layer (a
+> `HerdrBackend` shelling out to the `herdr` CLI; `yeschef tui` launches herdr's
+> native UI). Per that decision, **SQLite was kept** as the durable ticket ledger
+> (now storing herdr's `workspace_id`/`pane_id`) — the "drop SQLite" analysis
+> below stands as a possible *future* step, not something this migration did. See
+> `DEVELOPMENT.md` ("herdr backend notes") for the resulting architecture. The
+> phased plan in §6 is annotated with what actually happened.
+
+**Status:** investigation (original) + implemented migration to herdr as the
+session/TUI backend, with SQLite retained.
 
 **Question asked:** Can [`herdr`](https://github.com/ogulcancelik/herdr) replace
 yeschef's tmux-based TUI/session layer, and could that let us **drop SQLite**?
@@ -287,7 +297,11 @@ licensing, the tmux deletion, and the SQLite drop.
 herdr is buildable/runnable through yeschef's flake (`nix run .#herdr`); this
 document lands. **No behaviour change**, nothing depends on herdr. See §7.
 
-### Phase 1 — Manual validation, no yeschef code (needs licensing signoff first)
+### Phase 1 — Manual validation, no yeschef code (needs licensing signoff first) — ✅ done
+
+The herdr socket-API JSON contract was validated end-to-end against a throwaway
+server before any backend code was written (workspace create/list, pane run/read,
+report-metadata, server restart-restore, teardown).
 
 Stand up a **throwaway** herdr server (unique `--session` + `HERDR_CONFIG_PATH`,
 or `--no-session`) and drive the exact loop yeschef needs, capturing the JSON
@@ -312,7 +326,13 @@ Code detection + native resume behave? Decide the identity-encoding scheme
 (workspace name vs. reported metadata). Deliverable: a validation note + captured
 JSON fixtures.
 
-### Phase 2 — `HerdrBackend` behind a trait; SQLite kept; tmux still default
+### Phase 2 — `HerdrBackend` behind a trait; SQLite kept — ✅ done (this PR)
+
+Implemented, though collapsed with Phase 3 (tmux removed outright rather than
+kept as a feature-flagged default) at the human's direction. The `HerdrBackend`
+trait + real/mock impls, the orchestrate rewrite, the store columns
+(`workspace_id`/`pane_id`), and the herdr-based e2e suite all landed here.
+Original plan text:
 
 - Introduce a `SessionBackend` seam (generalise `TmuxBackend`, or add a sibling
   trait) with a `HerdrBackend` impl that shells out to `herdr` exactly as the real
@@ -334,7 +354,11 @@ JSON fixtures.
 **Gate:** herdr backend reaches parity with tmux on the full loop, with mock +
 e2e coverage, before it can become the default.
 
-### Phase 3 — Make herdr the default; delete the tmux layer (needs approval)
+### Phase 3 — Make herdr the default; delete the tmux layer (needs approval) — ✅ done (this PR)
+
+Approved and done: the tmux `RealBackend`, `tmux.conf`, `@status` machinery, and
+the per-window `respawn` restart were all removed; `tui`/`attach` now shim to
+`herdr`. Original plan text:
 
 Once proven: flip the default to herdr, then remove `tmux.conf`, the tmux
 `RealBackend`, `set_window_status`, and the `restart` command/logic; reduce

@@ -7,10 +7,9 @@ on:
 jobs:
   ci:
     name: nix flake check + e2e
-    # Runs on Linux (x86_64-linux). The only thing that ever tied CI to macOS
-    # was the old zmx dependency (Apple-SDK-coupled); tmux comes from nixpkgs
-    # and is fully cross-platform, and the suite has no macOS-specific behaviour,
-    # so the cheaper/faster ubuntu runner is the right home now.
+    # Runs on Linux (x86_64-linux). herdr comes from its own pinned flake and is
+    # cross-platform, and the suite has no macOS-specific behaviour, so the
+    # cheaper/faster ubuntu runner is the right home.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -22,9 +21,9 @@ jobs:
       - name: nix flake check
         run: nix flake check -L
 
-      # The e2e suite is intentionally NOT a sandboxed flake check: it drives
-      # REAL tmux sessions and REAL git worktrees, sharing the global `yeschef`
-      # tmux server (a private `-L` socket) and spawning detached sessions. Run
-      # it un-sandboxed here.
+      # The e2e suite is intentionally NOT a sandboxed flake check: it drives a
+      # REAL herdr server and REAL git worktrees on a throwaway per-test session,
+      # spawning a detached server. Run it un-sandboxed here (`nix run .#e2e`
+      # puts git + herdr on PATH).
       - name: e2e
         run: nix run .#e2e

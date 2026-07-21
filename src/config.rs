@@ -2,22 +2,16 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::backend::real::{check_binary, RealGitBackend, RealTmuxBackend};
-use crate::backend::{GitBackend, TmuxBackend};
+use crate::backend::real::{check_binary, RealGitBackend, RealHerdrBackend};
+use crate::backend::{GitBackend, HerdrBackend};
 use crate::store::Store;
-
-/// yeschef's own tmux configuration, baked into the binary and written to
-/// `<home>/tmux.conf` at load. Loaded via `tmux -f` on a private socket so
-/// yeschef never reads or clobbers the user's `~/.tmux.conf`. Ships the
-/// `extended-keys` settings that let Claude Code see Shift+Enter.
-const TMUX_CONF: &str = include_str!("../tmux.conf");
 
 /// Runtime configuration: home directory + backend handles.
 pub struct Config {
     pub home: PathBuf,
     pub store: Store,
     pub git: Box<dyn GitBackend>,
-    pub tmux: Box<dyn TmuxBackend>,
+    pub herdr: Box<dyn HerdrBackend>,
 }
 
 impl Config {
@@ -27,12 +21,11 @@ impl Config {
         let home = resolve_home()?;
         let db_path = home.join("yeschef.db");
         let store = Store::open(&db_path).context("failed to open yeschef database")?;
-        let tmux_conf = ensure_tmux_conf(&home)?;
         Ok(Self {
             home,
             store,
             git: Box::new(RealGitBackend),
-            tmux: Box::new(RealTmuxBackend::new(tmux_conf)),
+            herdr: Box::new(RealHerdrBackend::new()),
         })
     }
 
@@ -103,30 +96,17 @@ pub fn resolve_src_dir() -> Result<PathBuf> {
     Ok(home.join("yeschef").join("yeschef-src"))
 }
 
-/// The command the pinned head chef (window 0 of the brigade session) runs.
-/// Defaults to `claude`; overridable via `YESCHEF_HEADCHEF_CMD` for a different
-/// harness (`codex`, `claude --model …`, …) or for tests, which point it at a
-/// long-lived stand-in so no real agent is required.
+/// The command the pinned head chef (its own workspace in the brigade session)
+/// runs. Defaults to `claude`; overridable via `YESCHEF_HEADCHEF_CMD` for a
+/// different harness (`codex`, `claude --model …`, …) or for tests, which point
+/// it at a long-lived stand-in so no real agent is required.
 pub fn resolve_headchef_command() -> String {
     std::env::var("YESCHEF_HEADCHEF_CMD").unwrap_or_else(|_| "claude".to_string())
-}
-
-/// Write yeschef's own tmux config to `<home>/tmux.conf` and return its path.
-/// Rewritten on every load so config changes ship with the binary. The private
-/// tmux server is launched with `tmux -f <this path>` (see `backend::real`),
-/// isolating yeschef's sessions from the user's `~/.tmux.conf`.
-pub fn ensure_tmux_conf(home: &std::path::Path) -> Result<PathBuf> {
-    std::fs::create_dir_all(home)
-        .with_context(|| format!("failed to create yeschef home at {}", home.display()))?;
-    let path = home.join("tmux.conf");
-    std::fs::write(&path, TMUX_CONF)
-        .with_context(|| format!("failed to write tmux config at {}", path.display()))?;
-    Ok(path)
 }
 
 /// Validate that all required host binaries are available.
 pub fn check_host_deps() -> Result<()> {
     check_binary("git").context("'git' is required")?;
-    check_binary("tmux").context("'tmux' is required")?;
+    check_binary("herdr").context("'herdr' is required")?;
     Ok(())
 }

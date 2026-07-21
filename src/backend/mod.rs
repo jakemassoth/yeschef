@@ -53,65 +53,75 @@ pub trait GitBackend: Send + Sync {
         -> Result<BranchStatus>;
 }
 
-/// Liveness/identity info for a single ticket window.
+/// A herdr workspace yeschef has created for a ticket: its workspace id and the
+/// id of its root pane (where the agent runs). Both are opaque ids minted by
+/// herdr and parsed out of its JSON — yeschef persists them in the store and
+/// addresses the ticket by them thereafter.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WindowInfo {
-    pub name: String,
-    pub active: bool,
-    pub dead: bool,
+pub struct Workspace {
+    pub workspace_id: String,
+    pub pane_id: String,
 }
 
-/// Trait abstracting `tmux` terminal session operations.
+/// Liveness/identity for one herdr workspace, from `herdr workspace list`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceInfo {
+    pub workspace_id: String,
+    /// The workspace label yeschef set at creation — `<project>/<branch>` for a
+    /// cook, or the head-chef label. Human-facing; yeschef matches tickets by
+    /// `workspace_id`, not by label.
+    pub label: String,
+    /// herdr's live-detected aggregate agent status for the workspace
+    /// (`idle`/`working`/`blocked`/`done`/`unknown`).
+    pub agent_status: String,
+}
+
+/// Trait abstracting the [`herdr`](https://github.com/ogulcancelik/herdr) agent
+/// multiplexer, which yeschef drives as an external CLI (arm's-length, exactly
+/// as the old tmux backend shelled out to `tmux`).
 ///
-/// The whole brigade lives in **one** tmux session (`names::yeschef_session`):
-/// the pinned head chef at window 0 (`names::headchef_window`) and one window
-/// per line cook, each named `<project>-<branch>`. A ticket "window" therefore
-/// maps onto a real tmux window addressed as `<session>:<window>` (see
-/// `backend::real`) — which is exactly what lets `tmux attach` show every cook
-/// together in a native tab bar (the yeschef TUI). The session runs on a private
-/// tmux server (a dedicated `-L` socket) loaded with yeschef's own config, so it
-/// never touches the user's tmux server or `~/.tmux.conf`. The head chef drives
-/// windows via `send_keys`/`capture_pane` without being attached; the human
-/// attaches to watch and to talk to the head chef.
-pub trait TmuxBackend: Send + Sync {
-    /// Whether the brigade session itself exists.
-    fn session_exists(&self, session: &str) -> Result<bool>;
-    /// Ensure the brigade session exists. If absent, create it (detached) with
-    /// window 0 named `head_window`, running `head_command` in `head_cwd` — the
-    /// pinned head chef. Idempotent: an existing session is left untouched
-    /// (the head chef is never restarted or duplicated).
-    fn ensure_session(
-        &self,
-        session: &str,
-        head_window: &str,
-        head_cwd: &Path,
-        head_command: &str,
-    ) -> Result<()>;
-    /// Create a new window in the session running `command` in `cwd`. The
-    /// session must already exist (see `ensure_session`).
-    fn new_window(&self, session: &str, window: &str, cwd: &Path, command: &str) -> Result<()>;
-    /// Restart the process in an existing window *in place*: kill whatever is
-    /// running in its pane and relaunch `command` in `cwd`, keeping the window
-    /// itself — its name, tab position, and `@status` decoration — intact. This
-    /// is what `restart` uses to swap a running agent for a fresh process (e.g.
-    /// to pick up a Claude Code update) without disturbing the brigade layout;
-    /// unlike kill + `new_window`, the tab never disappears and reappears. The
-    /// window must already exist.
-    fn respawn_window(&self, session: &str, window: &str, cwd: &Path, command: &str) -> Result<()>;
-    fn window_exists(&self, session: &str, window: &str) -> Result<bool>;
-    /// Send a single line of text followed by Enter into a window.
-    fn send_keys(&self, session: &str, window: &str, text: &str) -> Result<()>;
-    /// Capture the visible pane of a window. `lines` limits to the last N lines.
-    fn capture_pane(&self, session: &str, window: &str, lines: Option<usize>) -> Result<String>;
-    /// Set the per-window `@status` user option that yeschef's `tmux.conf`
-    /// renders as a colour-coded tab in the status line. Called on every
-    /// `ticket ... status-set` so the brigade tab bar reflects a cook's
-    /// self-reported status live, with no polling and no rendering on our side.
-    fn set_window_status(&self, session: &str, window: &str, status: &str) -> Result<()>;
-    /// List every window in the session (head chef included). Callers match the
-    /// names against the ticket registry to build the brigade view.
-    fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>>;
-    fn kill_window(&self, session: &str, window: &str) -> Result<()>;
-    /// Attach to the session; if `window` is given, select it on attach.
-    fn attach(&self, session: &str, window: Option<&str>) -> Result<()>;
+/// The whole brigade lives in **one** named herdr session (see
+/// `backend::real::resolve_herdr_session`, default `yeschef`), served by a
+/// single background herdr server. Each line cook is a herdr **workspace**
+/// labelled `<project>/<branch>`, whose root **pane** runs the agent; the head
+/// chef is another workspace. Naming the session is what isolates yeschef's
+/// brigade from a human's own default `herdr` session. The head chef drives cook
+/// panes via `run_in_pane`/`read_pane` over the socket API without being
+/// attached; `attach` hands the terminal to herdr's native TUI (the yeschef
+/// TUI), where every workspace shows as a live, status-coloured entry.
+pub trait HerdrBackend: Send + Sync {
+    /// Ensure the brigade's herdr server is running, starting it (detached,
+    /// headless) if not. Idempotent — an already-running server is left alone.
+    fn ensure_server(&self) -> Result<()>;
+    /// Whether the brigade's herdr server is currently running.
+    fn server_running(&self) -> Result<bool>;
+    /// Stop the brigade's herdr server. herdr persists the session shape to
+    /// disk, so a subsequent `ensure_server` restores the workspaces (and, with
+    /// `resume_agents_on_restore`, resumes each agent's conversation) — this is
+    /// what `restart` builds on. A no-op if the server is already down.
+    fn stop_server(&self) -> Result<()>;
+    /// Create a workspace labelled `label`, its root pane rooted at `cwd`, and
+    /// return the workspace + root-pane ids. The server must already be running
+    /// (see `ensure_server`). The pane starts an interactive shell; launch the
+    /// agent into it with `run_in_pane`.
+    fn create_workspace(&self, label: &str, cwd: &Path) -> Result<Workspace>;
+    /// Type a line of text into a pane and submit it (Enter). Used both to
+    /// launch the agent into a fresh pane and to steer a running one.
+    fn run_in_pane(&self, pane_id: &str, text: &str) -> Result<()>;
+    /// Read a pane's recent terminal output. `lines` limits to the last N lines.
+    fn read_pane(&self, pane_id: &str, lines: Option<usize>) -> Result<String>;
+    /// Attach display-only metadata to a pane recording the cook's self-reported
+    /// task status, so herdr's TUI can surface it. Best-effort decoration — it
+    /// does not touch herdr's own live agent-status detection.
+    fn set_display_status(&self, pane_id: &str, status: &str) -> Result<()>;
+    /// List every workspace in the brigade session (head chef included). Callers
+    /// match `workspace_id` against the ticket registry to build the brigade
+    /// view and to tell live tickets from gone ones.
+    fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>>;
+    /// Close a workspace (and everything in it). A workspace that is already gone
+    /// is not an error — teardown must be idempotent.
+    fn close_workspace(&self, workspace_id: &str) -> Result<()>;
+    /// Hand the terminal to herdr's native TUI for the brigade session. If a
+    /// `workspace_id` is given, focus it first so attach lands there.
+    fn attach(&self, workspace_id: Option<&str>) -> Result<()>;
 }

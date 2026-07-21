@@ -3,7 +3,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[derive(Parser, Debug)]
 #[command(
     name = "yeschef",
-    about = "Orchestrate coding agents across git worktrees via tmux"
+    about = "Orchestrate coding agents across git worktrees via herdr"
 )]
 pub struct Cli {
     /// Increase verbosity (-v for debug, -vv for trace)
@@ -31,7 +31,7 @@ pub enum Commands {
         project: Option<String>,
     },
 
-    /// Create a worktree and launch an agent in a tmux session
+    /// Create a worktree and launch an agent in a herdr workspace
     Spawn {
         /// Project name
         project: String,
@@ -83,7 +83,7 @@ pub enum Commands {
     /// swapped for a fresh one.
     Restart,
 
-    /// Attach to a yeschef tmux session to watch the brigade
+    /// Attach to the yeschef herdr brigade to watch the cooks
     Attach {
         /// Optional project to select a specific ticket window
         project: Option<String>,
@@ -154,8 +154,9 @@ pub enum TicketCommands {
     },
 }
 
-/// Self-reported task status a line cook sets on its ticket. Orthogonal to tmux
-/// window liveness — this is what the cook says about its own work.
+/// Self-reported task status a line cook sets on its ticket. Orthogonal to
+/// herdr's live agent-status detection — this is what the cook says about its
+/// own work.
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
     #[value(name = "IN_PROGRESS")]

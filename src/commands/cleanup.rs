@@ -3,7 +3,6 @@ use anyhow::{bail, Context, Result};
 use crate::backend::BranchStatus;
 use crate::cli::TaskStatus;
 use crate::config::Config;
-use crate::names::yeschef_session;
 use crate::store::TicketRow;
 
 // ---------------------------------------------------------------------------
@@ -37,7 +36,6 @@ pub fn run_cleanup(config: &Config, project: Option<&str>, yes: bool) -> Result<
         return Ok(());
     }
 
-    let session = yeschef_session();
     let mut reaped = 0usize;
     let mut kept = 0usize;
 
@@ -92,7 +90,7 @@ pub fn run_cleanup(config: &Config, project: Option<&str>, yes: bool) -> Result<
 
             let reason = reap_reason(git_status, &ticket.status);
             if yes {
-                reap_ticket(config, session, name, &ticket)?;
+                reap_ticket(config, name, &ticket)?;
                 println!("  reaped {name}/{} — {reason}", ticket.branch);
             } else {
                 println!("  would reap {name}/{} — {reason}", ticket.branch);
@@ -187,15 +185,22 @@ fn resolve_projects(config: &Config, project: Option<&str>) -> Result<Vec<String
     }
 }
 
-/// Tear a ticket down: kill its tmux session, remove its worktree (pruning
+/// Tear a ticket down: close its herdr workspace, remove its worktree (pruning
 /// stale metadata), delete the local branch, and deregister it. Each step is
-/// idempotent, so a ticket whose session or worktree is already gone reaps
+/// idempotent, so a ticket whose workspace or worktree is already gone reaps
 /// cleanly rather than erroring out.
-fn reap_ticket(config: &Config, session: &str, project: &str, ticket: &TicketRow) -> Result<()> {
-    config
-        .tmux
-        .kill_window(session, &ticket.window)
-        .with_context(|| format!("failed to kill window for '{project}/{}'", ticket.branch))?;
+fn reap_ticket(config: &Config, project: &str, ticket: &TicketRow) -> Result<()> {
+    if !ticket.workspace_id.is_empty() {
+        config
+            .herdr
+            .close_workspace(&ticket.workspace_id)
+            .with_context(|| {
+                format!(
+                    "failed to close workspace for '{project}/{}'",
+                    ticket.branch
+                )
+            })?;
+    }
 
     let bare_dir = config.bare_repo_dir(project);
     let worktree_path = config.worktree_dir(project, &ticket.branch);
@@ -223,7 +228,7 @@ fn reap_ticket(config: &Config, session: &str, project: &str, ticket: &TicketRow
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::mock::{MockGitBackend, MockTmuxBackend};
+    use crate::backend::mock::{MockGitBackend, MockHerdrBackend};
     use crate::store::Store;
     use tempfile::TempDir;
 
@@ -233,7 +238,7 @@ mod tests {
     /// Keep `_tmp` alive for the duration of the test.
     struct Harness {
         config: Config,
-        tmux: MockTmuxBackend,
+        herdr: MockHerdrBackend,
         git: MockGitBackend,
         _tmp: TempDir,
     }
@@ -244,29 +249,36 @@ mod tests {
         store
             .add_project("proj", "https://example.com/proj.git")
             .unwrap();
-        let tmux = MockTmuxBackend::new();
+        let herdr = MockHerdrBackend::new();
         let config = Config {
             home: tmp.path().to_path_buf(),
             store,
             git: Box::new(git.clone()),
-            tmux: Box::new(tmux.clone()),
+            herdr: Box::new(herdr.clone()),
         };
         Harness {
             config,
-            tmux,
+            herdr,
             git,
             _tmp: tmp,
         }
+    }
+
+    /// The herdr workspace id a test registers for `branch` — deterministic so
+    /// reap assertions can name it.
+    fn workspace_id(branch: &str) -> String {
+        format!("ws-{branch}")
     }
 
     /// Register a ticket on `proj` in the store the same way `spawn` would.
     /// Fresh tickets take the `NEW` status default.
     fn register(h: &Harness, branch: &str) {
         let sanitized = crate::names::sanitize_branch(branch);
-        let window = crate::names::window_name("proj", &sanitized);
+        let ws = workspace_id(branch);
+        let pane = format!("{ws}:p1");
         h.config
             .store
-            .register_ticket("proj", branch, &sanitized, &window, "claude")
+            .register_ticket("proj", branch, &sanitized, &ws, &pane, "claude")
             .unwrap();
     }
 
@@ -296,11 +308,11 @@ mod tests {
             .unwrap()
             .is_none());
 
-        // The full teardown path ran: kill window, remove worktree, delete branch.
-        let tmux = h.tmux.recorded_calls();
+        // The full teardown path ran: close workspace, remove worktree, delete branch.
+        let herdr = h.herdr.recorded_calls();
         assert!(
-            tmux.contains(&"kill_window:yeschef:proj-done".to_string()),
-            "tmux calls: {tmux:?}"
+            herdr.contains(&format!("close_workspace:{}", workspace_id("done"))),
+            "herdr calls: {herdr:?}"
         );
         let git = h.git.recorded_calls();
         assert!(
@@ -351,10 +363,10 @@ mod tests {
             !git.iter().any(|c| c.starts_with("remove_worktree:")),
             "unmerged work must not be removed; git calls: {git:?}"
         );
-        let tmux = h.tmux.recorded_calls();
+        let herdr = h.herdr.recorded_calls();
         assert!(
-            !tmux.iter().any(|c| c.starts_with("kill_window:")),
-            "unmerged work must not be killed; tmux calls: {tmux:?}"
+            !herdr.iter().any(|c| c.starts_with("close_workspace:")),
+            "unmerged work must not be closed; herdr calls: {herdr:?}"
         );
     }
 
@@ -384,10 +396,10 @@ mod tests {
             "dry run must not remove worktrees; git calls: {git:?}"
         );
         assert!(!h
-            .tmux
+            .herdr
             .recorded_calls()
             .iter()
-            .any(|c| c.starts_with("kill_window:")));
+            .any(|c| c.starts_with("close_workspace:")));
     }
 
     #[test]
@@ -503,10 +515,10 @@ mod tests {
             !git.iter().any(|c| c.starts_with("remove_worktree:")),
             "active/unmerged work must not be removed; git calls: {git:?}"
         );
-        let tmux = h.tmux.recorded_calls();
+        let herdr = h.herdr.recorded_calls();
         assert!(
-            !tmux.iter().any(|c| c.starts_with("kill_window:")),
-            "active/unmerged work must not be killed; tmux calls: {tmux:?}"
+            !herdr.iter().any(|c| c.starts_with("close_workspace:")),
+            "active/unmerged work must not be closed; herdr calls: {herdr:?}"
         );
     }
 

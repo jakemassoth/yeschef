@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 
-use super::{BranchStatus, GitBackend, TmuxBackend, WindowInfo};
+use super::{BranchStatus, GitBackend, HerdrBackend, Workspace, WorkspaceInfo};
 
 // ---------------------------------------------------------------------------
 // Recording mock for GitBackend
@@ -131,24 +131,36 @@ impl GitBackend for MockGitBackend {
 }
 
 // ---------------------------------------------------------------------------
-// Recording mock for TmuxBackend
+// Recording mock for HerdrBackend
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Default)]
-pub struct MockTmuxBackend {
-    pub calls: Arc<Mutex<Vec<String>>>,
-    pub existing_sessions: Arc<Mutex<Vec<String>>>,
-    /// In-memory windows per session, so orchestration logic can be tested
-    /// without a real tmux. Keyed by session; value is the ordered window list.
-    pub windows: Arc<Mutex<HashMap<String, Vec<WindowInfo>>>>,
-    /// Canned pane content keyed by "`session:window`".
-    pub pane_contents: Arc<Mutex<HashMap<String, String>>>,
-    /// Per-window `@status` values set via `set_window_status`, keyed by
-    /// "`session:window`".
-    pub window_statuses: Arc<Mutex<HashMap<String, String>>>,
+/// One workspace in the mock's in-memory herdr model.
+#[derive(Clone)]
+struct MockWorkspace {
+    workspace_id: String,
+    label: String,
+    pane_id: String,
+    agent_status: String,
 }
 
-impl MockTmuxBackend {
+#[derive(Clone, Default)]
+pub struct MockHerdrBackend {
+    pub calls: Arc<Mutex<Vec<String>>>,
+    /// Whether the brigade server is "running". `ensure_server` flips it on;
+    /// `stop_server` flips it off — mirroring the real lifecycle.
+    pub running: Arc<Mutex<bool>>,
+    /// In-memory workspaces, so orchestration logic is testable without a real
+    /// herdr server. Ordered by creation.
+    workspaces: Arc<Mutex<Vec<MockWorkspace>>>,
+    /// Canned pane content keyed by pane id (what `read_pane` returns).
+    pub pane_contents: Arc<Mutex<HashMap<String, String>>>,
+    /// Display-status metadata set per pane via `set_display_status`.
+    pub display_statuses: Arc<Mutex<HashMap<String, String>>>,
+    /// Monotonic counter minting workspace/pane ids (`w1`, `w1:p1`, …).
+    next_id: Arc<Mutex<u32>>,
+}
+
+impl MockHerdrBackend {
     pub fn new() -> Self {
         Self::default()
     }
@@ -157,21 +169,29 @@ impl MockTmuxBackend {
         self.calls.lock().unwrap().clone()
     }
 
-    pub fn with_pane(self, session: &str, window: &str, content: &str) -> Self {
+    /// Pre-seed a pane's readable content by id. Ids are minted deterministically
+    /// (`w1:p1` for the first workspace created, `w2:p1` for the second, …).
+    pub fn with_pane(self, pane_id: &str, content: &str) -> Self {
         self.pane_contents
             .lock()
             .unwrap()
-            .insert(format!("{session}:{window}"), content.to_string());
+            .insert(pane_id.to_string(), content.to_string());
         self
     }
 
-    /// The `@status` last set on a window via `set_window_status`, if any.
-    pub fn window_status(&self, session: &str, window: &str) -> Option<String> {
-        self.window_statuses
+    /// The display status last set on a pane via `set_display_status`, if any.
+    pub fn display_status(&self, pane_id: &str) -> Option<String> {
+        self.display_statuses.lock().unwrap().get(pane_id).cloned()
+    }
+
+    /// The label of a workspace by id, if it exists.
+    pub fn workspace_label(&self, workspace_id: &str) -> Option<String> {
+        self.workspaces
             .lock()
             .unwrap()
-            .get(&format!("{session}:{window}"))
-            .cloned()
+            .iter()
+            .find(|w| w.workspace_id == workspace_id)
+            .map(|w| w.label.clone())
     }
 
     fn record(&self, call: String) {
@@ -179,143 +199,98 @@ impl MockTmuxBackend {
     }
 }
 
-impl TmuxBackend for MockTmuxBackend {
-    fn session_exists(&self, session: &str) -> Result<bool> {
-        self.record(format!("session_exists:{session}"));
-        Ok(self
-            .existing_sessions
-            .lock()
-            .unwrap()
-            .contains(&session.to_string()))
-    }
-
-    fn ensure_session(
-        &self,
-        session: &str,
-        head_window: &str,
-        head_cwd: &Path,
-        head_command: &str,
-    ) -> Result<()> {
-        self.record(format!(
-            "ensure_session:{}:{}:{}:{}",
-            session,
-            head_window,
-            head_cwd.display(),
-            head_command
-        ));
-        // Idempotent, mirroring the real backend: only create the session (and
-        // its head chef window 0) when it's absent.
-        let mut sessions = self.existing_sessions.lock().unwrap();
-        if !sessions.contains(&session.to_string()) {
-            sessions.push(session.to_string());
-            self.windows
-                .lock()
-                .unwrap()
-                .entry(session.to_string())
-                .or_default()
-                .push(WindowInfo {
-                    name: head_window.to_string(),
-                    active: true,
-                    dead: false,
-                });
-        }
+impl HerdrBackend for MockHerdrBackend {
+    fn ensure_server(&self) -> Result<()> {
+        self.record("ensure_server".to_string());
+        *self.running.lock().unwrap() = true;
         Ok(())
     }
 
-    fn new_window(&self, session: &str, window: &str, cwd: &Path, command: &str) -> Result<()> {
-        self.record(format!(
-            "new_window:{}:{}:{}:{}",
-            session,
-            window,
-            cwd.display(),
-            command
-        ));
-        self.windows
-            .lock()
-            .unwrap()
-            .entry(session.to_string())
-            .or_default()
-            .push(WindowInfo {
-                name: window.to_string(),
-                active: true,
-                dead: false,
-            });
+    fn server_running(&self) -> Result<bool> {
+        Ok(*self.running.lock().unwrap())
+    }
+
+    fn stop_server(&self) -> Result<()> {
+        self.record("stop_server".to_string());
+        *self.running.lock().unwrap() = false;
         Ok(())
     }
 
-    fn respawn_window(&self, session: &str, window: &str, cwd: &Path, command: &str) -> Result<()> {
-        self.record(format!(
-            "respawn_window:{}:{}:{}:{}",
-            session,
-            window,
-            cwd.display(),
-            command
-        ));
-        // Respawn keeps the window in place, so the in-memory window list is
-        // unchanged — mirroring the real backend, which swaps only the pane's
-        // process. Callers only respawn windows they've confirmed live.
+    fn create_workspace(&self, label: &str, cwd: &Path) -> Result<Workspace> {
+        self.record(format!("create_workspace:{label}:{}", cwd.display()));
+        let mut n = self.next_id.lock().unwrap();
+        *n += 1;
+        let workspace_id = format!("w{n}");
+        let pane_id = format!("{workspace_id}:p1");
+        self.workspaces.lock().unwrap().push(MockWorkspace {
+            workspace_id: workspace_id.clone(),
+            label: label.to_string(),
+            pane_id: pane_id.clone(),
+            agent_status: "unknown".to_string(),
+        });
+        Ok(Workspace {
+            workspace_id,
+            pane_id,
+        })
+    }
+
+    fn run_in_pane(&self, pane_id: &str, text: &str) -> Result<()> {
+        self.record(format!("run_in_pane:{pane_id}:{text}"));
         Ok(())
     }
 
-    fn window_exists(&self, session: &str, window: &str) -> Result<bool> {
-        self.record(format!("window_exists:{session}:{window}"));
-        Ok(self
-            .windows
-            .lock()
-            .unwrap()
-            .get(session)
-            .is_some_and(|ws| ws.iter().any(|w| w.name == window)))
-    }
-
-    fn send_keys(&self, session: &str, window: &str, text: &str) -> Result<()> {
-        self.record(format!("send_keys:{session}:{window}:{text}"));
-        Ok(())
-    }
-
-    fn capture_pane(&self, session: &str, window: &str, lines: Option<usize>) -> Result<String> {
+    fn read_pane(&self, pane_id: &str, lines: Option<usize>) -> Result<String> {
         self.record(format!(
-            "capture_pane:{session}:{window}:{}",
+            "read_pane:{pane_id}:{}",
             lines.map_or_else(|| "all".to_string(), |n| n.to_string())
         ));
         Ok(self
             .pane_contents
             .lock()
             .unwrap()
-            .get(&format!("{session}:{window}"))
+            .get(pane_id)
             .cloned()
             .unwrap_or_default())
     }
 
-    fn set_window_status(&self, session: &str, window: &str, status: &str) -> Result<()> {
-        self.record(format!("set_window_status:{session}:{window}:{status}"));
-        self.window_statuses
+    fn set_display_status(&self, pane_id: &str, status: &str) -> Result<()> {
+        self.record(format!("set_display_status:{pane_id}:{status}"));
+        self.display_statuses
             .lock()
             .unwrap()
-            .insert(format!("{session}:{window}"), status.to_string());
+            .insert(pane_id.to_string(), status.to_string());
         Ok(())
     }
 
-    fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>> {
-        self.record(format!("list_windows:{session}"));
-        Ok(self
-            .windows
-            .lock()
-            .unwrap()
-            .get(session)
-            .cloned()
-            .unwrap_or_default())
-    }
-
-    fn kill_window(&self, session: &str, window: &str) -> Result<()> {
-        self.record(format!("kill_window:{session}:{window}"));
-        if let Some(ws) = self.windows.lock().unwrap().get_mut(session) {
-            ws.retain(|w| w.name != window);
+    fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
+        self.record("list_workspaces".to_string());
+        if !*self.running.lock().unwrap() {
+            return Ok(Vec::new());
         }
+        Ok(self
+            .workspaces
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|w| WorkspaceInfo {
+                workspace_id: w.workspace_id.clone(),
+                label: w.label.clone(),
+                agent_status: w.agent_status.clone(),
+            })
+            .collect())
+    }
+
+    fn close_workspace(&self, workspace_id: &str) -> Result<()> {
+        self.record(format!("close_workspace:{workspace_id}"));
+        self.workspaces
+            .lock()
+            .unwrap()
+            .retain(|w| w.workspace_id != workspace_id);
         Ok(())
     }
 
-    fn attach(&self, session: &str, window: Option<&str>) -> Result<()> {
-        self.record(format!("attach:{session}:{}", window.unwrap_or("-")));
+    fn attach(&self, workspace_id: Option<&str>) -> Result<()> {
+        self.record(format!("attach:{}", workspace_id.unwrap_or("-")));
         Ok(())
     }
 }
